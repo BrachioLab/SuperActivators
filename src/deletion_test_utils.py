@@ -1,15 +1,8 @@
 """Utils for Deletion Test"""
 import torch
-import pandas as pd
-from PIL import Image
-import os
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-import importlib
-import general_utils
-importlib.reload(general_utils)
-from general_utils import retrieve_image, plot_image_with_attributes
+from .general_utils import retrieve_image, plot_image_with_attributes
 
 ### Helper Functions for Deletion Test ###
 def blackout_patches(image, patch_size, stride_ratio):

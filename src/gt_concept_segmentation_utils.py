@@ -12,13 +12,8 @@ from PIL import Image
 
 from pycocotools.coco import COCO
 
-import importlib
-import general_utils
-importlib.reload( general_utils)
-import patch_alignment_utils
-importlib.reload(patch_alignment_utils)
-from  general_utils import load_images, retrieve_present_concepts
-from patch_alignment_utils import get_image_idx_from_global_patch_idx
+from  .general_utils import load_images, retrieve_present_concepts
+from .patch_alignment_utils import get_image_idx_from_global_patch_idx
 
 ### all-dataset purpose ###
 def plot_seg_maps(dataset_name, input_image_size=(224, 224), img_idx=-1):

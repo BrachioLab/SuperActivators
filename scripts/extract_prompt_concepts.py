@@ -2,8 +2,12 @@ import numpy as np
 import argparse
 from src.prompt_concepts import OurLLM, LLMNet, RawInput
 from src.datasets import ImageDataset
+from src.quant_concept_evals_utils import compute_concept_thresholds
 from tqdm import tqdm
 import csv
+import matplotlib.pyplot as plt
+import pandas as pd
+import torch
 
 
 def main(args):
@@ -93,6 +97,49 @@ def eval(args):
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
         f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         print(f"F1 for {concepts}: {f1_score:.4f}")
+
+    # create a bar plot of the F1 scores sorted by F1 score
+    f1_scores = []
+    for idx, concepts in enumerate(concept_names):
+        gt = gt_labels_array[:, idx]
+        pred = extracted_concepts_array[:, idx]
+        # Calculate F1 score
+        tp = np.sum((gt == 1) & (pred == 1))
+        fp = np.sum((gt == 0) & (pred == 1))
+        fn = np.sum((gt == 1) & (pred == 0))
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        f1_scores.append(f1_score)
+    f1_scores = np.array(f1_scores)
+    sorted_indices = np.argsort(f1_scores)[::-1]
+    sorted_f1_scores = f1_scores[sorted_indices]
+    sorted_concept_names = np.array(concept_names)[sorted_indices]
+
+    plt.figure(figsize=(10, 15))
+    plt.barh(sorted_concept_names, sorted_f1_scores)
+    plt.xlabel("F1 Score")
+    plt.title("F1 Scores for Extracted Concepts")
+
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.subplots_adjust(left=0.2, right=0.95, top=0.95, bottom=0.05)
+    plt.xticks(fontsize=8)
+    plt.yticks(fontsize=8)
+
+    # add a line at 0.5
+    plt.axvline(x=0.5, color='r', linestyle='--', label='Threshold')
+
+    # save the plot
+    plt.savefig(f"{args.dataset}_{args.model.split('/')[1]}_f1_scores.png")
+
+    # load linsep concepts
+    concepts_file = "linsep_concepts_CLIP_cls_embeddings_percentthrumodel_70.csv"
+    linsep_dists = pd.read_csv(f"/shared_data0/cgoldberg/Concept_Inversion/Experiments/Distances/{args.dataset}/dists_{concepts_file}")
+    gt_images_per_concept_test = torch.load(f'/shared_data0/cgoldberg/Concept_Inversion/Experiments/GT_Samples/{args.dataset}/gt_images_per_concept_test_image.pt')
+    thresholds = compute_concept_thresholds(gt_images_per_concept_test, linsep_dists, 0.95)
+    print(thresholds)
+
 
 
 if __name__ == "__main__":
