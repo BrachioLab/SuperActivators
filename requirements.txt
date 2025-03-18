@@ -3,3 +3,4 @@ pandas
 matplotlib
 openai
 vllm
+accelerate>=0.26.0
