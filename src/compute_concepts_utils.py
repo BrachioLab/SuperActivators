@@ -28,12 +28,8 @@ from PIL import Image, ImageDraw, ImageFont
 from matplotlib.patches import Rectangle
 from IPython.display import display, clear_output
 
-import importlib
-import general_utils
-importlib.reload(general_utils)
-
-from general_utils import retrieve_image, load_images, get_split_df
-from patch_alignment_utils import get_patch_split_df
+from .general_utils import retrieve_image, load_images, get_split_df
+from .patch_alignment_utils import get_patch_split_df
 
 ### For Computing Embeddings ###
 def get_final_cls_embeddings(model, processor, images, device):

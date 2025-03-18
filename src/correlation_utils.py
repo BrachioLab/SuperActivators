@@ -6,8 +6,8 @@ from tqdm import tqdm
 import pandas as pd
 from collections import defaultdict
 import os
-from compute_concepts_utils import calculate_patch_location, make_image_with_highlighted_patch
-from patch_alignment_utils import compute_patch_similarities_to_vector
+from .compute_concepts_utils import calculate_patch_location, make_image_with_highlighted_patch
+from .patch_alignment_utils import compute_patch_similarities_to_vector
 
 ### For Computing Correlations and Visualizing them ###
 def get_binary_image_concept_activations(cosine_similarities, device, threshold=0.2):

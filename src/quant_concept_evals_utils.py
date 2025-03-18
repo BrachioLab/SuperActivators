@@ -11,12 +11,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 import importlib
-import general_utils
-importlib.reload(general_utils)
 
-from general_utils import compute_cossim_w_vector, get_split_df
-from patch_alignment_utils import get_patch_split_df
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices
+from .general_utils import compute_cossim_w_vector, get_split_df
+from .patch_alignment_utils import get_patch_split_df
+from .gt_concept_segmentation_utils import map_concepts_to_patch_indices
 
 ############# Find Thresholds for Concepts #############
 def compute_avg_rand_threshold(embeddings, patch_indices, percentile, n_vectors=5, device="cuda"):
@@ -71,7 +69,7 @@ def compute_avg_rand_threshold(embeddings, patch_indices, percentile, n_vectors=
     
     return avg_threshold
 
-def compute_concept_thresholds(gt_samples_per_concept, embeddings, cos_sims, percentile, n_vectors=5, device="cuda", n_concepts_to_print=0):
+def compute_concept_thresholds(gt_samples_per_concept, cos_sims, percentile, device="cuda", n_concepts_to_print=0):
     """
     GPU-accelerated and vectorized computation of cosine similarity thresholds for each concept.
     For each concept, the threshold is defined as the (1 - percentile) quantile of its cosine 
@@ -93,9 +91,6 @@ def compute_concept_thresholds(gt_samples_per_concept, embeddings, cos_sims, per
               The threshold is computed from the concept's cosine similarities,
               and random_threshold is the average threshold from random vectors.
     """
-    # Move embeddings to the device.
-    embeddings = embeddings.to(device)
-    
     # Convert the cosine similarity DataFrame to a torch tensor on the GPU.
     cos_sims_tensor = torch.tensor(cos_sims.values, device=device)
     
@@ -123,16 +118,15 @@ def compute_concept_thresholds(gt_samples_per_concept, embeddings, cos_sims, per
     concept_thresholds = {}
     for i, concept in enumerate(concept_names):
         sample_indices = gt_samples_per_concept[concept]
-        rand_threshold = compute_avg_rand_threshold(embeddings, sample_indices, percentile, n_vectors=n_vectors, device=device)
         threshold_val = thresholds_tensor[i].item()
-        concept_thresholds[concept] = (threshold_val, rand_threshold)
+        concept_thresholds[concept] = threshold_val
     
     if n_concepts_to_print > 0: 
         print(f"Concept thresholds using {percentile*100:.1f}%:")
-        for i, (concept, (threshold, random_threshold)) in enumerate(concept_thresholds.items()):
+        for i, (concept, threshold) in enumerate(concept_thresholds.items()):
             if i > n_concepts_to_print:
                 break
-            print(f"Concept {concept}: {threshold:.4f}, (random={random_threshold:.4f})")
+            print(f"Concept {concept}: {threshold:.4f}")
     
     return concept_thresholds
 

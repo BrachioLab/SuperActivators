@@ -9,13 +9,7 @@ from collections import defaultdict
 from sklearn.metrics.pairwise import cosine_similarity
 import os
 
-# import importlib
-# import utils
-# import compute_concepts_utils
-# importlib.reload(utils)
-# importlib.reload(compute_concepts_utils)
-
-from general_utils import retrieve_image
+from .general_utils import retrieve_image
 # from visualize_concepts_w_samples_utils import plot_patches_sim_to_vector
 
 ############ For Reasoning About Patch Indices #################
