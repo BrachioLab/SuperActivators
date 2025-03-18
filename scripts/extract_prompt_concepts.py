@@ -8,11 +8,19 @@ import csv
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
+from vllm import LLM
 
 
 def main(args):
     # load model
-    model = OurLLM(model_name=args.model)
+    # model = OurLLM(model_name=args.model)
+    model = LLM(model=args.model,
+                max_model_len=12288,
+                limit_mm_per_prompt={"image": 10},
+                max_num_seqs=1,
+                enforce_eager=True if "llama" in args.model.lower() else False,
+                trust_remote_code=True,
+    )
 
     # load dataset
     data = ImageDataset(root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test")
@@ -26,11 +34,19 @@ def main(args):
     for concept in concept_names:
         extractor = LLMNet(
             model,
-            input_desc="an image",
+            input_desc=f"an image which may contain concepts from the list {concept_names}",
             output_desc=f"the word 'Yes' if the image contains {concept}, otherwise 'No'",
             image_before_prompt=True
         )
         concept_extractors.append(extractor)
+    # for concept in concept_names:
+    #     extractor = LLMNet(
+    #         model,
+    #         input_desc="an image",
+    #         output_desc=f"a list (in the format [concept1, concept2, ...]) of the concepts that are present in the image out of the following: {concept_names}",
+    #         image_before_prompt=True
+    #     )
+    #     concept_extractors.append(extractor)
 
     extracted_concepts = []
     for i in tqdm(range(len(data))):
@@ -40,10 +56,10 @@ def main(args):
         concept_outputs = []
         for extractor in concept_extractors:
             output = extractor.forward(RawInput(image_input=image, text_input=None))
-            if "Yes" in output:
-                output = 1
-            else:
-                output = 0
+            # if "Yes" in output:
+            #     output = 1
+            # else:
+            #     output = 0
             concept_outputs.append(output)
 
         print("Extracted:", concept_outputs)
