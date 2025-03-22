@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
-from src.general_utils import load_images, retrieve_present_concepts
+from .utils.general_utils import load_images, retrieve_present_concepts
 
 class ImageDataset(Dataset):
     """

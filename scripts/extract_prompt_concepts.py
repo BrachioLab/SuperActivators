@@ -2,7 +2,8 @@ import numpy as np
 import argparse
 from src.prompt_concepts import OurLLM, LLMNet, RawInput
 from src.datasets import ImageDataset
-from src.quant_concept_evals_utils import compute_concept_thresholds
+from src.utils.quant_concept_evals_utils import compute_concept_thresholds
+from src.inversion_methods import prompt_inversion
 from tqdm import tqdm
 import csv
 import matplotlib.pyplot as plt
@@ -10,6 +11,60 @@ import pandas as pd
 import torch
 from vllm import LLM
 
+
+def concept_inversion(args):
+    # load model
+    # model = OurLLM(model_name=args.model)
+    model = LLM(model=args.model,
+                max_model_len=12288,
+                limit_mm_per_prompt={"image": 10},
+                max_num_seqs=1,
+                enforce_eager=True if "llama" in args.model.lower() else False,
+                trust_remote_code=True,
+                gpu_memory_utilization=0.5,
+    )
+
+    # load dataset
+    data = ImageDataset(root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test")
+    concept_names = data.get_concept_names()
+
+    if "class" in concept_names:
+        concept_names.remove("class")
+
+    # load detected concepts
+    concepts_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
+    with open(concepts_file, mode='r') as file:
+        reader = csv.reader(file)
+        next(reader)  # Skip header
+        detected_concepts = [list(map(lambda x: 1 if "yes" in x.lower() else 0, row[1:])) for row in reader]
+    detected_concepts = np.array(detected_concepts)
+
+    inversion_results = []
+    for i in tqdm(range(len(data))):
+        image, _ = data[i]
+
+        # get concept inversion for only present concepts
+        concept_inversion = {}
+        for j, concept in enumerate(concept_names):
+            if detected_concepts[i][j] == 1:
+                inversion = prompt_inversion(model, concept, image)
+                print("Inversion:", inversion)
+                concept_inversion[concept] = inversion
+        inversion_results.append(concept_inversion)
+    
+    # Save inversion results to a file
+    output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
+    with open(output_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Image Index"] + concept_names)
+        for idx, concepts in enumerate(inversion_results):
+            row = [idx]
+            for concept in concept_names:
+                if concept in concepts:
+                    row.append(concepts[concept])
+                else:
+                    row.append("No inversion")
+            writer.writerow(row)
 
 def main(args):
     # load model
@@ -20,6 +75,7 @@ def main(args):
                 max_num_seqs=1,
                 enforce_eager=True if "llama" in args.model.lower() else False,
                 trust_remote_code=True,
+                gpu_memory_utilization=0.5,
     )
 
     # load dataset
@@ -49,18 +105,27 @@ def main(args):
     #     concept_extractors.append(extractor)
 
     extracted_concepts = []
+    inversion_results = []
     for i in tqdm(range(len(data))):
         image, _ = data[i]
 
         # extract concepts
         concept_outputs = []
-        for extractor in concept_extractors:
+        concept_inversion = {}
+        for j, extractor in enumerate(concept_extractors):
             output = extractor.forward(RawInput(image_input=image, text_input=None))
-            # if "Yes" in output:
-            #     output = 1
-            # else:
-            #     output = 0
+            if "Yes" in output:
+                output = 1
+            else:
+                output = 0
             concept_outputs.append(output)
+
+            # get inversion if concept present
+            if output == 1:
+                inversion = prompt_inversion(model, concept_names[j], image)
+                print("Inversion:", inversion)
+                concept_inversion[concept_names[j]] = inversion
+        inversion_results.append(concept_inversion)
 
         print("Extracted:", concept_outputs)
         extracted_concepts.append(concept_outputs)
@@ -72,6 +137,20 @@ def main(args):
         writer.writerow(["Image Index"] + concept_names)
         for idx, concepts in enumerate(extracted_concepts):
             writer.writerow([idx] + concepts)
+
+    # Save inversion results to a file
+    output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
+    with open(output_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Image Index"] + concept_names)
+        for idx, concepts in enumerate(inversion_results):
+            row = [idx]
+            for concept in concept_names:
+                if concept in concepts:
+                    row.append(concepts[concept])
+                else:
+                    row.append("No inversion")
+            writer.writerow(row)
 
 
 def eval(args):
@@ -183,12 +262,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to evaluate the concepts."
     )
+    parser.add_argument(
+        "--inversion",
+        action="store_true",
+        help="Whether to perform inversion."
+    )
     args = parser.parse_args()
 
     if args.model == "llama3.2-11":
         args.model = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+    elif args.model == "qwen2.5-vl-3":
+        args.model = "Qwen/Qwen2.5-VL-3B-Instruct"
 
     if args.eval:
         eval(args)
+    elif args.inversion:
+        concept_inversion(args)
     else:
         main(args)
