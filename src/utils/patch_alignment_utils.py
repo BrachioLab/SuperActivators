@@ -1,16 +1,12 @@
-import torch
-import torch.nn.functional as F
-import pandas as pd
-from PIL import Image
-import numpy as np
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from collections import defaultdict
-from sklearn.metrics.pairwise import cosine_similarity
 import os
 
-from .general_utils import retrieve_image
+import matplotlib.pyplot as plt
+import pandas as pd
+import torch
+import torch.nn.functional as F
+
 # from visualize_concepts_w_samples_utils import plot_patches_sim_to_vector
+
 
 ############ For Reasoning About Patch Indices #################
 def compute_patches_per_image(patch_size=14, model_input_size=(224, 224)):
@@ -18,6 +14,7 @@ def compute_patches_per_image(patch_size=14, model_input_size=(224, 224)):
     num_patches_per_col = model_input_size[1] // patch_size  # 224 // 14 = 16
     patches_per_image = num_patches_per_row * num_patches_per_col  # 16 * 16 = 256 patches per image
     return patches_per_image
+
 
 def get_patch_range_for_image(image_index, patch_size=14, model_input_size=(224, 224)):
     """
@@ -77,7 +74,7 @@ def calculate_patch_location(image, patch_idx, patch_size=14, model_input_size=(
 
     return left, top, right, bottom
 
-    
+
 def get_image_idx_from_global_patch_idx(patch_index, patch_size=14, image_size=(224, 224)):
     """
     Given a patch index in a 1D vector, returns the image index it belongs to.
@@ -90,7 +87,9 @@ def get_image_idx_from_global_patch_idx(patch_index, patch_size=14, image_size=(
     Returns:
         int: The index of the image the patch belongs to.
     """
-    patches_per_image = compute_patches_per_image(patch_size=patch_size, model_input_size=image_size)
+    patches_per_image = compute_patches_per_image(
+        patch_size=patch_size, model_input_size=image_size
+    )
     return patch_index // patches_per_image
 
 
@@ -102,7 +101,7 @@ def calculate_patch_indices(image_index, patch_index_in_image, patch_size, model
 
     global_patch_idx = image_index * (patches_per_row * patches_per_col) + patch_index_in_image
     return patches_per_row, patches_per_col, global_patch_idx
-    
+
 
 def get_patch_split_df(dataset_name, patch_size=14, model_input_size=(224, 224)):
     """
@@ -115,9 +114,9 @@ def get_patch_split_df(dataset_name, patch_size=14, model_input_size=(224, 224))
     Returns:
         pd.DataFrame: A new DataFrame where each patch has its own row and inherits the split from the image.
     """
-    per_sample_metadata_df = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
-    split_df = per_sample_metadata_df['split']
-    
+    per_sample_metadata_df = pd.read_csv(f"../Data/{dataset_name}/metadata.csv")
+    split_df = per_sample_metadata_df["split"]
+
     num_patches = compute_patches_per_image(patch_size, model_input_size)
 
     # Repeat each row num_patches times and reset index
@@ -126,9 +125,19 @@ def get_patch_split_df(dataset_name, patch_size=14, model_input_size=(224, 224))
 
 
 ############# Visualize patch similarities to vectors #############
-def compute_patch_similarities_to_vector(image_index, concept_label, images, embeddings,
-                                      cossims, dataset_name='CLEVR', patch_size=14, model_input_size=(224, 224),
-                                      save_path=None, heatmap_path=None, show_plot=False):
+def compute_patch_similarities_to_vector(
+    image_index,
+    concept_label,
+    images,
+    embeddings,
+    cossims,
+    dataset_name="CLEVR",
+    patch_size=14,
+    model_input_size=(224, 224),
+    save_path=None,
+    heatmap_path=None,
+    show_plot=False,
+):
     """
     Computes a heatmap of cosine similarities between a target vector and all patches in a given image.
 
@@ -150,16 +159,16 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
 
     Notes:
         - If a heatmap plot already exists at the specified save path, it will be loaded and displayed.
-        - The heatmap shows the cosine similarity between the target vector and each patch's embedding 
+        - The heatmap shows the cosine similarity between the target vector and each patch's embedding
           in a grid corresponding to the patch layout.
     """
-    #Return heatmap if it already exists
+    # Return heatmap if it already exists
     if not show_plot and os.path.exists(heatmap_path):
         try:
             heatmap = torch.load(heatmap_path)
             return heatmap
         except:
-            os.remove(heatmap_path) #delete incomplete halfway saved heatmap
+            os.remove(heatmap_path)  # delete incomplete halfway saved heatmap
 
     # Process the image
     image = images[image_index]
@@ -173,11 +182,13 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
     # Extract embeddings for the entire image
     # start_patch_index = image_index * (patches_per_row * patches_per_col)
     # end_patch_index = start_patch_index + (patches_per_row * patches_per_col)
-    start_patch_index, end_patch_index = get_patch_range_for_image(image_index, patch_size=patch_size, model_input_size=model_input_size)
+    start_patch_index, end_patch_index = get_patch_range_for_image(
+        image_index, patch_size=patch_size, model_input_size=model_input_size
+    )
     # Compute cosine similarities between the target vector and all patches
     concept_cos_sims = cossims[concept_label].to_numpy()
     curr_image_cos_sims = concept_cos_sims[start_patch_index:end_patch_index]
-    
+
     # Reshape similarities to match the patch grid
     cos_sim_grid = curr_image_cos_sims.reshape(patches_per_col, patches_per_row)
 
@@ -185,10 +196,13 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
     heatmap = torch.tensor(cos_sim_grid)
     if heatmap_path:
         torch.save(heatmap, heatmap_path)
-    
+
     return heatmap
 
-def compute_heatmaps_for_concept(concept_label, my_image_indices, images, embeds, cos_sims, dataset_name, con_label, top_n):
+
+def compute_heatmaps_for_concept(
+    concept_label, my_image_indices, images, embeds, cos_sims, dataset_name, con_label, top_n
+):
     """
     Computes heatmaps for a given concept by calculating patch similarities across specified images.
 
@@ -206,90 +220,144 @@ def compute_heatmaps_for_concept(concept_label, my_image_indices, images, embeds
     """
     heatmaps = {}
     for image_index in my_image_indices:
-            heatmap_path = f'Heatmaps/{dataset_name}/patchsim_concept_{concept_label}_img_{image_index}_heatmaptype_avgsim_model__{con_label}'
-            heatmap = compute_patch_similarities_to_vector(image_index=image_index, concept_label=str(concept_label), 
-                                              images=images, embeddings=embeds,  cossims=cos_sims,
-                                              dataset_name='CLEVR', patch_size=14, model_input_size=(224, 224),
-                                              save_path=None,
-                                              heatmap_path=heatmap_path)
-            heatmaps[image_index] = heatmap
+        heatmap_path = f"Heatmaps/{dataset_name}/patchsim_concept_{concept_label}_img_{image_index}_heatmaptype_avgsim_model__{con_label}"
+        heatmap = compute_patch_similarities_to_vector(
+            image_index=image_index,
+            concept_label=str(concept_label),
+            images=images,
+            embeddings=embeds,
+            cossims=cos_sims,
+            dataset_name="CLEVR",
+            patch_size=14,
+            model_input_size=(224, 224),
+            save_path=None,
+            heatmap_path=heatmap_path,
+        )
+        heatmaps[image_index] = heatmap
     return heatmaps
 
-    
-def plot_aggregated_most_similar_patches_w_heatmaps_and_corr_images(group, images, cos_sims, concepts,
-                                                                     embeds, con_label, dataset_name='CLEVR', patch_size=14, 
-                                                                    model_input_size=(224, 224), top_n=5, vmin=None, vmax=None):
+
+def plot_aggregated_most_similar_patches_w_heatmaps_and_corr_images(
+    group,
+    images,
+    cos_sims,
+    concepts,
+    embeds,
+    con_label,
+    dataset_name="CLEVR",
+    patch_size=14,
+    model_input_size=(224, 224),
+    top_n=5,
+    vmin=None,
+    vmax=None,
+):
     """
     Plots the most similar patches with a chosen concept, as well as the heatmaps for that concept and the corresponding image.
     """
-    #get the most similar patches to the average of the vectors in the group
+    # get the most similar patches to the average of the vectors in the group
     avg_group_vector = compute_average_vector(group, concepts, percentile=90)
     avg_vector_cos_sims = F.cosine_similarity(embeds, avg_group_vector.unsqueeze(0), dim=1)
     most_similar_patches = torch.topk(avg_vector_cos_sims, top_n)[1]
-    
+
     fig, axes = plt.subplots(2, top_n, figsize=(top_n * 3, 6))
-    
+
     aggregated_heatmaps = {}
     images_w_patches = []
     for patch_idx in most_similar_patches:
         # Determine the image index
-        image_idx = patch_idx // ((model_input_size[0] // patch_size) * (model_input_size[1] // patch_size))
+        image_idx = patch_idx // (
+            (model_input_size[0] // patch_size) * (model_input_size[1] // patch_size)
+        )
         image = images[image_idx]
-        
-        #Compute the heatmap for all of the concepts in the group
+
+        # Compute the heatmap for all of the concepts in the group
         heatmaps_across_concepts = []
         for concept_label in group:
-            #Compute the heatmap for that image-concept combo
-            heatmap_path = f'Heatmaps/{dataset_name}/patchsim_concept_{concept_label}_img_{image_idx}_heatmaptype_avgsim_model__{con_label}'
+            # Compute the heatmap for that image-concept combo
+            heatmap_path = f"Heatmaps/{dataset_name}/patchsim_concept_{concept_label}_img_{image_idx}_heatmaptype_avgsim_model__{con_label}"
             try:
-                heatmap = compute_patch_similarities_to_vector(image_index=image_idx, concept_label=str(concept_label), 
-                                                  images=images, embeddings=embeds,  cossims=cos_sims,
-                                                  dataset_name='CLEVR', patch_size=14, model_input_size=(224, 224),
-                                                  save_path=None,
-                                                  heatmap_path=heatmap_path, show_plot=False)
+                heatmap = compute_patch_similarities_to_vector(
+                    image_index=image_idx,
+                    concept_label=str(concept_label),
+                    images=images,
+                    embeddings=embeds,
+                    cossims=cos_sims,
+                    dataset_name="CLEVR",
+                    patch_size=14,
+                    model_input_size=(224, 224),
+                    save_path=None,
+                    heatmap_path=heatmap_path,
+                    show_plot=False,
+                )
             except:
-                os.remove(heatmap_path) #delete incomplete halfway saved heatmap
-                heatmap = compute_patch_similarities_to_vector(image_index=image_idx, concept_label=str(concept_label), 
-                                                  images=images, embeddings=embeds,  cossims=cos_sims,
-                                                  dataset_name='CLEVR', patch_size=14, model_input_size=(224, 224),
-                                                  save_path=None,
-                                                  heatmap_path=heatmap_path, show_plot=False)
+                os.remove(heatmap_path)  # delete incomplete halfway saved heatmap
+                heatmap = compute_patch_similarities_to_vector(
+                    image_index=image_idx,
+                    concept_label=str(concept_label),
+                    images=images,
+                    embeddings=embeds,
+                    cossims=cos_sims,
+                    dataset_name="CLEVR",
+                    patch_size=14,
+                    model_input_size=(224, 224),
+                    save_path=None,
+                    heatmap_path=heatmap_path,
+                    show_plot=False,
+                )
             heatmaps_across_concepts.append(heatmap)
-        
-        #keep track of the average heatmap across all of the concepts in the group
+
+        # keep track of the average heatmap across all of the concepts in the group
         avg_heatmap = torch.stack(heatmaps_across_concepts).mean(dim=0)
-        aggregated_heatmaps[image_idx] = avg_heatmap    
+        aggregated_heatmaps[image_idx] = avg_heatmap
 
         # Get what you need for the image above the heatmap showing where the patch comes from
-        left, top, right, bottom = calculate_patch_location(image, patch_idx, patch_size, model_input_size)
-        image_with_patch = make_image_with_highlighted_patch(image, left, top, right, bottom, model_input_size, grayscale=True)
+        left, top, right, bottom = calculate_patch_location(
+            image, patch_idx, patch_size, model_input_size
+        )
+        image_with_patch = make_image_with_highlighted_patch(
+            image, left, top, right, bottom, model_input_size, grayscale=True
+        )
         images_w_patches.append(image_with_patch)
-    
+
     if not vmin and not vmax:
-        all_values = [value for heatmap in aggregated_heatmaps.values() for row in aggregated_heatmaps for value in row]
+        all_values = [
+            value
+            for heatmap in aggregated_heatmaps.values()
+            for row in aggregated_heatmaps
+            for value in row
+        ]
         vmin, vmax = min(all_values), max(all_values)
-    
+
     for i, patch_idx in enumerate(most_similar_patches):
-        image_idx = patch_idx // ((model_input_size[0] // patch_size) * (model_input_size[1] // patch_size))
+        image_idx = patch_idx // (
+            (model_input_size[0] // patch_size) * (model_input_size[1] // patch_size)
+        )
         image = images[image_idx].resize(model_input_size)
-        
+
         # Plot the original_image
         axes[0, i].imshow(image)
-        axes[0, i].set_title(f'Image {image_idx}')
-        axes[0, i].axis('off')
-        
+        axes[0, i].set_title(f"Image {image_idx}")
+        axes[0, i].axis("off")
+
         # Plot the image with highlighted patch and heatmap
         axes[1, i].imshow(images_w_patches[i], alpha=0.8)
-        ax_heatmap.set_title(f'Heatmap Max = {round(aggregated_heatmaps[image_idx].max().item(), 2)}')
-        heatmap_overlay = axes[1, i].imshow(aggregated_heatmaps[image_idx], cmap='hot', alpha=0.3, extent=(0, model_input_size[0], model_input_size[1], 0),
-                                           vmin=vmin, vmax=vmax)
-        axes[1, i].axis('off')
-
+        ax_heatmap.set_title(
+            f"Heatmap Max = {round(aggregated_heatmaps[image_idx].max().item(), 2)}"
+        )
+        heatmap_overlay = axes[1, i].imshow(
+            aggregated_heatmaps[image_idx],
+            cmap="hot",
+            alpha=0.3,
+            extent=(0, model_input_size[0], model_input_size[1], 0),
+            vmin=vmin,
+            vmax=vmax,
+        )
+        axes[1, i].axis("off")
 
     # Add a color bar for the heatmaps
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # Adjust the position of the color bar
     cbar = plt.colorbar(heatmap_overlay, cax=cbar_ax)
-    cbar.set_label('Cosine Similarity')
+    cbar.set_label("Cosine Similarity")
 
     # Adjust layout to prevent overlap
     plt.tight_layout(rect=[0, 0, 0.9, 1])  # Leave space for the color bar

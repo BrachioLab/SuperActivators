@@ -1,10 +1,12 @@
 """General utils"""
-from PIL import Image, ImageDraw, ImageFont
 import os
-import pandas as pd
+
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+import pandas as pd
 import torch.nn.functional as F
+from PIL import Image, ImageDraw, ImageFont
+from tqdm import tqdm
+
 
 def retrieve_image(img_idx, dataset_name, test_only=False):
     """
@@ -17,14 +19,15 @@ def retrieve_image(img_idx, dataset_name, test_only=False):
     Returns:
         PIL.Image: The image corresponding to the specified index.
     """
-    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+    metadata = pd.read_csv(f"../Data/{dataset_name}/metadata.csv")
     # if test_only:
     #     metadata = metadata[metadata["split"] == "test"].reset_index(drop=True)
-    image_path = os.path.join(f'../Data/{dataset_name}', metadata.iloc[img_idx]['image_path'])
+    image_path = os.path.join(f"../Data/{dataset_name}", metadata.iloc[img_idx]["image_path"])
     image = Image.open(image_path).convert("RGB")
     return image
 
-def load_images(root=".", dataset_name='CLEVR'):
+
+def load_images(root=".", dataset_name="CLEVR"):
     """
     Load images from a dataset.
 
@@ -35,18 +38,18 @@ def load_images(root=".", dataset_name='CLEVR'):
     Returns:
         list: A list of PIL.Image objects.
     """
-    metadata = pd.read_csv(f'{root}/Data/{dataset_name}/metadata.csv')
-    image_paths = metadata['image_path'].tolist()
-    splits = metadata['split'].tolist()
+    metadata = pd.read_csv(f"{root}/Data/{dataset_name}/metadata.csv")
+    image_paths = metadata["image_path"].tolist()
+    splits = metadata["split"].tolist()
 
     print("Loading images...")
     all_images, train_images, test_images = [], [], []
     for idx, info in tqdm(metadata.iterrows(), total=len(metadata)):
-        image_filename = info['image_path']
-        image = Image.open(f'{root}/Data/{dataset_name}/{image_filename}').convert("RGB")
+        image_filename = info["image_path"]
+        image = Image.open(f"{root}/Data/{dataset_name}/{image_filename}").convert("RGB")
         all_images.append(image)
-        
-        split = info['split']
+
+        split = info["split"]
         if split == "train":
             train_images.append(image)
         else:
@@ -56,22 +59,22 @@ def load_images(root=".", dataset_name='CLEVR'):
     return all_images, train_images, test_images
 
 
-def retrieve_topn_images(dataset_name, top_n, start_idx=0, split='test'):
-    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
-    my_image_indices = metadata[metadata['split'] == split].index[start_idx:top_n+start_idx]
+def retrieve_topn_images(dataset_name, top_n, start_idx=0, split="test"):
+    metadata = pd.read_csv(f"../Data/{dataset_name}/metadata.csv")
+    my_image_indices = metadata[metadata["split"] == split].index[start_idx : top_n + start_idx]
     return my_image_indices
 
 
 def retrieve_present_concepts(sample_idx, dataset_name, root="."):
     # Define the path to the metadata file based on the dataset
-    data_dir = f'{root}/Data/{dataset_name}/'
-    metadata_df = pd.read_csv(f'{root}/Data/{dataset_name}/metadata.csv')
+    data_dir = f"{root}/Data/{dataset_name}/"
+    metadata_df = pd.read_csv(f"{root}/Data/{dataset_name}/metadata.csv")
 
     # Select the metadata for the image at img_idx
     img_metadata = metadata_df.iloc[sample_idx]
 
     # Extract the column names for categories and supercategories
-    category_columns = [col for col in metadata_df.columns if col not in ['image_path']]
+    category_columns = [col for col in metadata_df.columns if col not in ["image_path"]]
 
     # Initialize an empty list to store the present concepts
     present_concepts = []
@@ -79,7 +82,7 @@ def retrieve_present_concepts(sample_idx, dataset_name, root="."):
     # Iterate through all the categories and supercategories
     for concept in category_columns:
         if img_metadata[concept] == 1:
-            present_concepts.append(concept) 
+            present_concepts.append(concept)
 
     return present_concepts
 
@@ -95,9 +98,9 @@ def get_split_df(dataset_name):
     Returns:
         pd.DataFrame: A new DataFrame where each patch has its own row and inherits the split from the image.
     """
-    per_sample_metadata_df = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
-    split_df = per_sample_metadata_df['split']
-    
+    per_sample_metadata_df = pd.read_csv(f"../Data/{dataset_name}/metadata.csv")
+    split_df = per_sample_metadata_df["split"]
+
     return split_df
 
 
@@ -107,7 +110,7 @@ def compute_cossim_w_vector(vector, embeddings):
 
     Args:
         vector (torch.Tensor): A tensor of shape (D,) representing the random vector.
-        embeddings (torch.Tensor): A tensor of shape (N, D) containing the embeddings, 
+        embeddings (torch.Tensor): A tensor of shape (N, D) containing the embeddings,
             where N is the number of embeddings, and D is the dimension of each embedding.
 
     Returns:
@@ -119,7 +122,7 @@ def compute_cossim_w_vector(vector, embeddings):
 
 
 ###Visualizations###
-def plot_image_with_attributes(image_index, dataset_name='CLEVR', save_image=False, test_only=True):
+def plot_image_with_attributes(image_index, dataset_name="CLEVR", save_image=False, test_only=True):
     """
     Plots an image with its associated attributes from a dataset.
 
@@ -127,31 +130,37 @@ def plot_image_with_attributes(image_index, dataset_name='CLEVR', save_image=Fal
         image_index (int): The index of the image in the dataset.
         dataset_name (str): Name of the dataset to load the image from.
     """
-    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+    metadata = pd.read_csv(f"../Data/{dataset_name}/metadata.csv")
     # if test_only:
     #     metadata = metadata[metadata["split"] == "test"].reset_index(drop=True)
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     font = ImageFont.truetype(font_path, 11)
 
     info = metadata.iloc[image_index]
-    attributes = [attr for attr in info.index if ((attr not in ['image_path', 'class', 'split']) and (info.loc[attr] == 1))]
+    attributes = [
+        attr
+        for attr in info.index
+        if ((attr not in ["image_path", "class", "split"]) and (info.loc[attr] == 1))
+    ]
 
-    image_path = info.loc['image_path']
-    img = Image.open(f'../Data/{dataset_name}/{image_path}')
+    image_path = info.loc["image_path"]
+    img = Image.open(f"../Data/{dataset_name}/{image_path}")
 
     # Create a new image with extra space at the bottom to accommodate the text
     text_height = 4  # Adjust the height of the text area
-    new_img = Image.new('RGB', (img.width, img.height + text_height * 15), color=(255, 255, 255))  # Added extra space for multiple lines
+    new_img = Image.new(
+        "RGB", (img.width, img.height + text_height * 15), color=(255, 255, 255)
+    )  # Added extra space for multiple lines
     new_img.paste(img, (0, 0))
 
     draw = ImageDraw.Draw(new_img)
 
     # Prepare the text string with attributes separated by commas
-    attribute_text = ', '.join(attributes)
+    attribute_text = ", ".join(attributes)
 
     # Wrap the text if it's too wide
     max_width = img.width  # Keep some padding from the edge
-    words = attribute_text.split(', ')
+    words = attribute_text.split(", ")
     lines = []
     current_line = ""
     for word in words:
@@ -173,16 +182,16 @@ def plot_image_with_attributes(image_index, dataset_name='CLEVR', save_image=Fal
 
     # Show the image with the attributes underneath it
     plt.imshow(new_img)
-    plt.axis('off')
+    plt.axis("off")
     plt.show()
 
     # Save the new image with attributes underneath
     if save_image:
-        output_image_path = f'../Figs/{dataset_name}/examples/example_{image_index}.jpg'
+        output_image_path = f"../Figs/{dataset_name}/examples/example_{image_index}.jpg"
         new_img.save(output_image_path, dpi=(500, 500))
-        
 
-def plot_random_image_samples(dataset_name='CLEVR', num_samples=10, save_image=True):
+
+def plot_random_image_samples(dataset_name="CLEVR", num_samples=10, save_image=True):
     """
     Plots random sample images with their attributes from a given dataset.
 
@@ -191,12 +200,10 @@ def plot_random_image_samples(dataset_name='CLEVR', num_samples=10, save_image=T
         num_samples (int): Number of sample images to plot.
         save_image (Boolean): Whether to save png file of image.
     """
-    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+    metadata = pd.read_csv(f"../Data/{dataset_name}/metadata.csv")
     total_samples = len(metadata)
 
     random_indices = np.random.choice(total_samples, num_samples, replace=False)
 
     for idx in random_indices:
         plot_image_with_attributes(idx, dataset_name, save_image=save_image)
-        
-
