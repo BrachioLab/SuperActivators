@@ -1,14 +1,21 @@
-import re
-from typing import Optional, List, Any
-import time
-import torch
-from PIL import Image
-from transformers import AutoProcessor, AutoModel, MllamaForConditionalGeneration, Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration
-from openai import OpenAI
-from io import BytesIO
 import base64
-from vllm import LLM, SamplingParams
+import re
+import time
 from dataclasses import dataclass
+from io import BytesIO
+from typing import Any, Optional
+
+import torch
+from openai import OpenAI
+from PIL import Image
+from transformers import (
+    AutoModel,
+    AutoProcessor,
+    MllamaForConditionalGeneration,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2VLForConditionalGeneration,
+)
+from vllm import LLM, SamplingParams
 
 
 @dataclass
@@ -44,7 +51,6 @@ def img2base64(img):
             new_width = int((28 / img.height) * img.width)
         img = img.resize((new_width, new_height))
 
-
     img.save(buffer, format="JPEG")
     return base64.b64encode(buffer.getvalue()).decode()
 
@@ -58,17 +64,49 @@ class OurLLM:
     def __init__(self, model_name):
         self.model_name = model_name
         if "Llama-3.2" in model_name:
-            self.model = MllamaForConditionalGeneration.from_pretrained(model_name, torch_dtype="auto", device_map="auto", token="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",)
-            self.processor = AutoProcessor.from_pretrained(model_name, token="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")
+            self.model = MllamaForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype="auto",
+                device_map="auto",
+                token="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",
+            )
+            self.processor = AutoProcessor.from_pretrained(
+                model_name, token="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"
+            )
         elif "QVQ" in model_name:
-            self.model = Qwen2VLForConditionalGeneration.from_pretrained(model_name, torch_dtype="auto", device_map="auto", attn_implementation="flash_attention_2", token="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")
-            self.processor = AutoProcessor.from_pretrained(model_name, token="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")
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype="auto",
+                device_map="auto",
+                attn_implementation="flash_attention_2",
+                token="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",
+            )
+            self.processor = AutoProcessor.from_pretrained(
+                model_name, token="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"
+            )
         elif "Qwen" in model_name:
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="auto", attn_implementation="flash_attention_2", token="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")
-            self.processor = AutoProcessor.from_pretrained(model_name, token="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")
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                attn_implementation="flash_attention_2",
+                token="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",
+            )
+            self.processor = AutoProcessor.from_pretrained(
+                model_name, token="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"
+            )
         elif "OpenGVLab/InternVL2_5-78B-MPO" in model_name:
-            self.model = AutoModel.from_pretrained(model_name, torch_dtype="auto", device_map="auto", attn_implementation="flash_attention_2", token="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", trust_remote_code=True)
-            self.processor = AutoProcessor.from_pretrained(model_name, token="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", trust_remote_code=True)
+            self.model = AutoModel.from_pretrained(
+                model_name,
+                torch_dtype="auto",
+                device_map="auto",
+                attn_implementation="flash_attention_2",
+                token="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",
+                trust_remote_code=True,
+            )
+            self.processor = AutoProcessor.from_pretrained(
+                model_name, token="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", trust_remote_code=True
+            )
 
     def chat(self, prompt, sampling_params, use_tqdm):
         # parse prompt content
@@ -88,18 +126,27 @@ class OurLLM:
         # prompt = [{"role": "user", "content": prompt_content}]
         print("prompt:", processed_prompt)
 
-        input_text = self.processor.apply_chat_template(processed_prompt, add_generation_prompt=True)
-        inputs = self.processor(imgs if len(imgs) > 0 else None, input_text, add_special_tokens=False, return_tensors="pt").to("cuda:0")
+        input_text = self.processor.apply_chat_template(
+            processed_prompt, add_generation_prompt=True
+        )
+        inputs = self.processor(
+            imgs if len(imgs) > 0 else None,
+            input_text,
+            add_special_tokens=False,
+            return_tensors="pt",
+        ).to("cuda:0")
 
         print(self.processor.decode(inputs["input_ids"][0]))
         start = time.time()
         with torch.no_grad():
-            outputs = self.model.generate(**inputs, max_new_tokens=2500, temperature=0.0, do_sample=False, top_p=1.0)
+            outputs = self.model.generate(
+                **inputs, max_new_tokens=2500, temperature=0.0, do_sample=False, top_p=1.0
+            )
         elapsed = time.time() - start
 
         print(f"Tokens per second: {(len(outputs[0][len(inputs['input_ids'][0]):])) / elapsed}")
 
-        output_text = self.processor.decode(outputs[0][len(inputs["input_ids"][0]):][:-1])
+        output_text = self.processor.decode(outputs[0][len(inputs["input_ids"][0]) :][:-1])
         print("output:", output_text)
 
         class Outputs:
@@ -119,7 +166,7 @@ class APIModel:
         if "gemini" in model_name:
             self.client = OpenAI(
                 api_key="AIzaSyCOrvkazwRNhQFyKMgHjID9HxGjRWWz1OQ",
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             )
         else:
             self.client = OpenAI(
@@ -134,6 +181,7 @@ class APIModel:
             max_tokens=2500,
             top_p=1.0,
         )
+
         class Outputs:
             def __init__(self, outputs):
                 self.outputs = outputs
@@ -150,7 +198,15 @@ class APIModel:
 
 
 class LLMNet:
-    def __init__(self, model: LLM, input_desc: str, output_desc: str, examples: Optional[IOExamples]=None, few_shot=True, image_before_prompt=False) -> str:
+    def __init__(
+        self,
+        model: LLM,
+        input_desc: str,
+        output_desc: str,
+        examples: Optional[IOExamples] = None,
+        few_shot=True,
+        image_before_prompt=False,
+    ) -> str:
         self.model = model
         self.input_desc = input_desc
         self.output_desc = output_desc
@@ -164,25 +220,36 @@ class LLMNet:
         # Adding any the examples to the prompt
         prompt_content = []
         if self.examples is not None:
-            for i, (ex_input, ex_output) in enumerate(zip(self.examples.inputs, self.examples.outputs)):
+            for i, (ex_input, ex_output) in enumerate(
+                zip(self.examples.inputs, self.examples.outputs)
+            ):
                 symbol_str = ", ".join([repr(o) for o in ex_output])
 
                 if i == 0:
-                    prompt_content.append({"type": "text", "text": f"After examining the input, determine {self.output_desc}. Here are some examples:"})
-
+                    prompt_content.append(
+                        {
+                            "type": "text",
+                            "text": f"After examining the input, determine {self.output_desc}. Here are some examples:",
+                        }
+                    )
 
                 if not self.image_before_prompt:
                     if self.few_shot:
                         prompt_content.append(
-                            {"type": "text", "text": f"\nThe following input is {self.input_desc}. Output just {self.output_desc} after 'FINAL ANSWER:'."}
+                            {
+                                "type": "text",
+                                "text": f"\nThe following input is {self.input_desc}. Output just {self.output_desc} after 'FINAL ANSWER:'.",
+                            }
                         )
                     else:
                         prompt_content.append(
-                            {"type": "text", "text": f"\nThe following is an example of {symbol_str}:"}
+                            {
+                                "type": "text",
+                                "text": f"\nThe following is an example of {symbol_str}:",
+                            }
                         )
                 else:
                     prompt_content.append({"type": "text", "text": f"\nExample {i + 1}:"})
-
 
                 if ex_input.text_input is not None and ex_input.image_input is None:
                     prompt_content.append(
@@ -223,7 +290,10 @@ class LLMNet:
                 if self.image_before_prompt:
                     if self.few_shot:
                         prompt_content.append(
-                            {"type": "text", "text": f"The input is {self.input_desc}. Output just {self.output_desc} after 'FINAL ANSWER:'."}
+                            {
+                                "type": "text",
+                                "text": f"The input is {self.input_desc}. Output just {self.output_desc} after 'FINAL ANSWER:'.",
+                            }
                         )
                     else:
                         prompt_content.append(
@@ -232,44 +302,61 @@ class LLMNet:
 
                 if self.few_shot:
                     prompt.append({"role": "user", "content": prompt_content})
-                    prompt.append({"role": "assistant", "content": [{"type": "text", "text": f"FINAL ANSWER: {symbol_str}"}]})
+                    prompt.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": f"FINAL ANSWER: {symbol_str}"}],
+                        }
+                    )
                     prompt_content = []
 
         if not self.image_before_prompt:
             prompt_content.append(
-                {"type": "text", "text": f"\nThe following input is {self.input_desc}. Examine it and then output just {self.output_desc} after 'FINAL ANSWER:'. If unsure of the answer, try to choose the best option."}
+                {
+                    "type": "text",
+                    "text": f"\nThe following input is {self.input_desc}. Examine it and then output just {self.output_desc} after 'FINAL ANSWER:'. If unsure of the answer, try to choose the best option.",
+                }
             )
         else:
-            prompt_content.append(
-                {"type": "text", "text": f"\n"}
-            )
-        
+            prompt_content.append({"type": "text", "text": "\n"})
+
         # Adding the input to the prompt (text or image)
         if input.text_input is not None and input.image_input is None:
             prompt_content.append({"type": "text", "text": input.text_input})
         elif input.text_input is None and input.image_input is not None:
             prompt_content.extend(
                 [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img2base64(input.image_input)}",
-                                                        "detail": "high",
-                                                        }},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img2base64(input.image_input)}",
+                            "detail": "high",
+                        },
+                    },
                 ]
             )
         else:
             prompt_content.extend(
                 [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img2base64(input.image_input)}",
-                                                        "detail": "high",
-                                                        }},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img2base64(input.image_input)}",
+                            "detail": "high",
+                        },
+                    },
                     {"type": "text", "text": input.text_input},
                 ]
             )
-        
+
         if self.image_before_prompt:
             prompt_content.append(
-                {"type": "text", "text": f"The input is {self.input_desc}. Examine it and then output just {self.output_desc} after 'FINAL ANSWER:'. If unsure of the answer, try to choose the best option."}
+                {
+                    "type": "text",
+                    "text": f"The input is {self.input_desc}. Examine it and then output just {self.output_desc} after 'FINAL ANSWER:'. If unsure of the answer, try to choose the best option.",
+                }
             )
-        
+
         prompt.append({"role": "user", "content": prompt_content})
 
         sampling_params = SamplingParams(temperature=0.0, max_tokens=5000, top_p=1.0)

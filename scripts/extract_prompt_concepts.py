@@ -1,31 +1,36 @@
-import numpy as np
 import argparse
-from src.prompt_concepts import OurLLM, LLMNet, RawInput
-from src.datasets import ImageDataset
-from src.utils.quant_concept_evals_utils import compute_concept_thresholds
-from src.inversion_methods import prompt_inversion
-from tqdm import tqdm
 import csv
+
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 from vllm import LLM
+
+from src.datasets import ImageDataset
+from src.inversion_methods import prompt_inversion
+from src.prompt_concepts import LLMNet, RawInput
+from src.utils.quant_concept_evals_utils import compute_concept_thresholds
 
 
 def concept_inversion(args):
     # load model
     # model = OurLLM(model_name=args.model)
-    model = LLM(model=args.model,
-                max_model_len=12288,
-                limit_mm_per_prompt={"image": 10},
-                max_num_seqs=1,
-                enforce_eager=True if "llama" in args.model.lower() else False,
-                trust_remote_code=True,
-                gpu_memory_utilization=0.5,
+    model = LLM(
+        model=args.model,
+        max_model_len=12288,
+        limit_mm_per_prompt={"image": 10},
+        max_num_seqs=1,
+        enforce_eager=True if "llama" in args.model.lower() else False,
+        trust_remote_code=True,
+        gpu_memory_utilization=0.5,
     )
 
     # load dataset
-    data = ImageDataset(root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test")
+    data = ImageDataset(
+        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+    )
     concept_names = data.get_concept_names()
 
     if "class" in concept_names:
@@ -33,10 +38,12 @@ def concept_inversion(args):
 
     # load detected concepts
     concepts_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
-    with open(concepts_file, mode='r') as file:
+    with open(concepts_file, mode="r") as file:
         reader = csv.reader(file)
         next(reader)  # Skip header
-        detected_concepts = [list(map(lambda x: 1 if "yes" in x.lower() else 0, row[1:])) for row in reader]
+        detected_concepts = [
+            list(map(lambda x: 1 if "yes" in x.lower() else 0, row[1:])) for row in reader
+        ]
     detected_concepts = np.array(detected_concepts)
 
     inversion_results = []
@@ -51,10 +58,10 @@ def concept_inversion(args):
                 print("Inversion:", inversion)
                 concept_inversion[concept] = inversion
         inversion_results.append(concept_inversion)
-    
+
     # Save inversion results to a file
     output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
-    with open(output_file, mode='w', newline='') as file:
+    with open(output_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Image Index"] + concept_names)
         for idx, concepts in enumerate(inversion_results):
@@ -66,20 +73,24 @@ def concept_inversion(args):
                     row.append("No inversion")
             writer.writerow(row)
 
+
 def main(args):
     # load model
     # model = OurLLM(model_name=args.model)
-    model = LLM(model=args.model,
-                max_model_len=12288,
-                limit_mm_per_prompt={"image": 10},
-                max_num_seqs=1,
-                enforce_eager=True if "llama" in args.model.lower() else False,
-                trust_remote_code=True,
-                gpu_memory_utilization=0.5,
+    model = LLM(
+        model=args.model,
+        max_model_len=12288,
+        limit_mm_per_prompt={"image": 10},
+        max_num_seqs=1,
+        enforce_eager=True if "llama" in args.model.lower() else False,
+        trust_remote_code=True,
+        gpu_memory_utilization=0.5,
     )
 
     # load dataset
-    data = ImageDataset(root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test")
+    data = ImageDataset(
+        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+    )
     concept_names = data.get_concept_names()
 
     if "class" in concept_names:
@@ -92,7 +103,7 @@ def main(args):
             model,
             input_desc=f"an image which may contain concepts from the list {concept_names}",
             output_desc=f"the word 'Yes' if the image contains {concept}, otherwise 'No'",
-            image_before_prompt=True
+            image_before_prompt=True,
         )
         concept_extractors.append(extractor)
     # for concept in concept_names:
@@ -132,7 +143,7 @@ def main(args):
 
     # Save extracted concepts to a file
     output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
-    with open(output_file, mode='w', newline='') as file:
+    with open(output_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Image Index"] + concept_names)
         for idx, concepts in enumerate(extracted_concepts):
@@ -140,7 +151,7 @@ def main(args):
 
     # Save inversion results to a file
     output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
-    with open(output_file, mode='w', newline='') as file:
+    with open(output_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Image Index"] + concept_names)
         for idx, concepts in enumerate(inversion_results):
@@ -155,7 +166,9 @@ def main(args):
 
 def eval(args):
     # load dataset
-    data = ImageDataset(root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test")
+    data = ImageDataset(
+        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+    )
     concept_names = data.get_concept_names()
 
     # get gt
@@ -173,11 +186,11 @@ def eval(args):
 
     # Load extracted concepts from the file
     output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
-    with open(output_file, mode='r') as file:
+    with open(output_file, mode="r") as file:
         reader = csv.reader(file)
         next(reader)  # Skip header
         extracted_concepts = [list(map(int, row[1:])) for row in reader]
-    
+
     extracted_concepts_array = np.array(extracted_concepts)
 
     # Evaluate the extracted concepts
@@ -190,7 +203,9 @@ def eval(args):
         fn = np.sum((gt == 1) & (pred == 0))
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        f1_score = (
+            2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        )
         print(f"F1 for {concepts}: {f1_score:.4f}")
 
     # create a bar plot of the F1 scores sorted by F1 score
@@ -204,7 +219,9 @@ def eval(args):
         fn = np.sum((gt == 1) & (pred == 0))
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        f1_score = (
+            2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        )
         f1_scores.append(f1_score)
     f1_scores = np.array(f1_scores)
     sorted_indices = np.argsort(f1_scores)[::-1]
@@ -223,22 +240,27 @@ def eval(args):
     plt.yticks(fontsize=8)
 
     # add a line at 0.5
-    plt.axvline(x=0.5, color='r', linestyle='--', label='Threshold')
+    plt.axvline(x=0.5, color="r", linestyle="--", label="Threshold")
 
     # save the plot
     plt.savefig(f"{args.dataset}_{args.model.split('/')[1]}_f1_scores.png")
 
     # load linsep concepts
     concepts_file = "linsep_concepts_CLIP_cls_embeddings_percentthrumodel_70.csv"
-    linsep_dists = pd.read_csv(f"/shared_data0/cgoldberg/Concept_Inversion/Experiments/Distances/{args.dataset}/dists_{concepts_file}")
-    gt_images_per_concept_test = torch.load(f'/shared_data0/cgoldberg/Concept_Inversion/Experiments/GT_Samples/{args.dataset}/gt_images_per_concept_test_image.pt')
+    linsep_dists = pd.read_csv(
+        f"/shared_data0/cgoldberg/Concept_Inversion/Experiments/Distances/{args.dataset}/dists_{concepts_file}"
+    )
+    gt_images_per_concept_test = torch.load(
+        f"/shared_data0/cgoldberg/Concept_Inversion/Experiments/GT_Samples/{args.dataset}/gt_images_per_concept_test_image.pt"
+    )
     thresholds = compute_concept_thresholds(gt_images_per_concept_test, linsep_dists, 0.95)
     print(thresholds)
 
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Use prompting to extract concepts from a dataset.")
+    parser = argparse.ArgumentParser(
+        description="Use prompting to extract concepts from a dataset."
+    )
     parser.add_argument(
         "--dataset",
         type=str,
@@ -255,18 +277,10 @@ if __name__ == "__main__":
         "--output_dir",
         type=str,
         default="/shared_data0/steinad/Concept_Inversion/",
-        help="The output directory for extracted concepts."
+        help="The output directory for extracted concepts.",
     )
-    parser.add_argument(
-        "--eval",
-        action="store_true",
-        help="Whether to evaluate the concepts."
-    )
-    parser.add_argument(
-        "--inversion",
-        action="store_true",
-        help="Whether to perform inversion."
-    )
+    parser.add_argument("--eval", action="store_true", help="Whether to evaluate the concepts.")
+    parser.add_argument("--inversion", action="store_true", help="Whether to perform inversion.")
     args = parser.parse_args()
 
     if args.model == "llama3.2-11":
