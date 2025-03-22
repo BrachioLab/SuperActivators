@@ -17,6 +17,11 @@ the code:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install torch torchvision torchaudio
-python -m pip install -r requirements.txt
-python -m pip install -e .
+python -m pip install -e ".[dev]"
+```
+
+## Development Setup
+To setup automatic code linting on every commit, run the following:
+```sh
+pre-commit install
 ```
