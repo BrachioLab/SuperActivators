@@ -172,3 +172,22 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Project-specific ignores
+logs/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.csv
+*.tsv
+*.jsonl
+*.tar.gz
+*.zip
+checkpoints/
+outputs/
+runs/
+wandb/
+.DS_Store
+.vscode/
