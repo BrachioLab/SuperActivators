@@ -191,3 +191,7 @@ runs/
 wandb/
 .DS_Store
 .vscode/
+
+# Large notebook files
+Correlation-Patch-Concepts.ipynb
+KMeans-Patch-Concepts-Newest.ipynb
