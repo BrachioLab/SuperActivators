@@ -2,11 +2,6 @@ import torch
 import pandas as pd
 from tqdm import tqdm
 
-import sys
-import os
-sys.path.append(os.path.abspath("utils"))
-
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -14,9 +9,9 @@ import matplotlib.cm as cm
 import torch.nn.functional as F
 import seaborn as sns
 
-from quant_concept_evals_utils import compute_concept_thresholds, compute_concept_metrics, \
+from .quant_concept_evals_utils import compute_concept_thresholds, compute_concept_metrics, \
      create_binary_labels, get_patch_detection_tensor
-from patch_alignment_utils import filter_patches_by_image_presence, get_patch_range_for_image, \
+from .patch_alignment_utils import filter_patches_by_image_presence, get_patch_range_for_image, \
      calculate_patch_location, get_patch_split_df
 from general_utils import pad_or_resize_img
 

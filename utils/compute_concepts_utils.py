@@ -12,7 +12,9 @@ import copy
 from transformers import AutoTokenizer
 from torch.nn.utils.rnn import pad_sequence
 import gc
+import sys
 
+sys.path.append(os.path.abspath(".."))
 
 import torch
 from torchvision import transforms
@@ -37,13 +39,13 @@ from matplotlib.patches import Rectangle
 from IPython.display import display, clear_output
 
 import importlib
-import general_utils
-import patch_alignment_utils
-importlib.reload(general_utils)
-importlib.reload(patch_alignment_utils)
+import utils.general_utils
+import utils.patch_alignment_utils
+importlib.reload(utils.general_utils)
+importlib.reload(utils.patch_alignment_utils)
 
-from general_utils import retrieve_image, load_images, get_split_df, create_binary_labels, filter_coco_concepts
-from patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
+from utils.general_utils import retrieve_image, load_images, get_split_df, create_binary_labels, filter_coco_concepts
+from utils.patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
 
 ### For Computing Embeddings ###
 def get_final_cls_embeddings(model, processor, images, device):
@@ -119,12 +121,12 @@ def get_clip_cls_embeddings(model, processor, images, device, percent_thru_model
     Returns:
         torch.Tensor: The generated image embeddings.
     """
-    if percent_thru_model == 100:
-        return get_final_cls_embeddings(model, processor, images, device)
-    else:
-        all_embeddings = get_intermediate_representations(model, processor, images, device, percent_thru_model)
-        #remove class token
-        cls_embeddings = all_embeddings[:, 0, :]
+    # if percent_thru_model == 100:
+    #     return get_final_cls_embeddings(model, processor, images, device)
+    # else:
+    all_embeddings = get_intermediate_representations(model, processor, images, device, percent_thru_model)
+    #remove class token
+    cls_embeddings = all_embeddings[:, 0, :]
     return cls_embeddings
 
 def get_clip_patch_embeddings(model, processor, images, device, percent_thru_model):

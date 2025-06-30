@@ -1,6 +1,6 @@
 import torch
 import pandas as pd
-from false_positive_extractor import get_false_positive_indices
+from .false_positive_extractor import get_false_positive_indices
 
 # Get patch false positives at percentile 0.3
 patch_results = get_false_positive_indices(

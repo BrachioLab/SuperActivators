@@ -16,7 +16,7 @@ import os
 # importlib.reload(utils)
 # importlib.reload(compute_concepts_utils)
 
-from general_utils import retrieve_image, get_resized_dims_w_same_ar, pad_or_resize_img
+from utils.general_utils import retrieve_image, get_resized_dims_w_same_ar, pad_or_resize_img
 # from visualize_concepts_w_samples_utils import plot_patches_sim_to_vector
 
 ############ For Reasoning About Patch Indices #################

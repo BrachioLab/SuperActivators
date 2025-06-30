@@ -10,14 +10,8 @@ import matplotlib.patches as mpatches
 import torch.nn.functional as F
 import torch
 
-import importlib
-import general_utils
-importlib.reload(general_utils)
-import patch_alignment_utils
-importlib.reload(patch_alignment_utils)
-
-from general_utils import retrieve_image, get_split_df, pad_or_resize_img
-from patch_alignment_utils import compute_patches_per_image, calculate_patch_location, compute_patch_similarities_to_vector, get_image_idx_from_global_patch_idx, get_patch_split_df, calculate_patch_indices
+from .general_utils import retrieve_image, get_split_df, pad_or_resize_img
+from .patch_alignment_utils import compute_patches_per_image, calculate_patch_location, compute_patch_similarities_to_vector, get_image_idx_from_global_patch_idx, get_patch_split_df, calculate_patch_indices
 
 ######### only when there's gt labels #########
 def get_user_category(concept_columns):

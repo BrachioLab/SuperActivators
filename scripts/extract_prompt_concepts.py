@@ -8,10 +8,12 @@ import torch
 from tqdm import tqdm
 from vllm import LLM
 
+import sys
+sys.path.append('/shared_data0/cgoldberg/Concept_Inversion/Experiments')
 from src.datasets import ImageDataset
 from src.inversion_methods import prompt_inversion
 from src.prompt_concepts import LLMNet, RawInput
-from src.utils.quant_concept_evals_utils import compute_concept_thresholds
+from utils.quant_concept_evals_utils import compute_concept_thresholds
 
 
 def concept_inversion(args):

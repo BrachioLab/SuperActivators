@@ -35,14 +35,8 @@ from PIL import Image, ImageDraw, ImageFont
 from matplotlib.patches import Rectangle
 from IPython.display import display, clear_output
 
-import importlib
-import general_utils
-import patch_alignment_utils
-importlib.reload(general_utils)
-importlib.reload(patch_alignment_utils)
-
-from general_utils import retrieve_image, load_images, get_split_df, create_binary_labels, filter_coco_concepts
-from patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
+from .general_utils import retrieve_image, load_images, get_split_df, create_binary_labels, filter_coco_concepts
+from .patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
 
 ### For Computing Embeddings ###
 def get_final_cls_embeddings(model, processor, images, device):

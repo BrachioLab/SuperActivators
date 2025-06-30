@@ -15,9 +15,9 @@ import gc
 import pyarrow 
 from glob import glob
 
-from quant_concept_evals_utils import compute_concept_metrics, filter_patches_by_image_presence, compute_stats_from_counts
-from patch_alignment_utils import get_patch_split_df
-from general_utils import create_binary_labels, get_split_df, filter_coco_concepts
+from utils.quant_concept_evals_utils import compute_concept_metrics, filter_patches_by_image_presence, compute_stats_from_counts
+from utils.patch_alignment_utils import get_patch_split_df
+from utils.general_utils import create_binary_labels, get_split_df, filter_coco_concepts
 
 
 ### Helper Quant Functions ###

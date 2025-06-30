@@ -4,14 +4,14 @@ import torch
 
 from transformers import CLIPModel, AutoProcessor, MllamaForConditionalGeneration
 
-sys.path.append(os.path.abspath("utils"))
-from general_utils import load_images
-from compute_concepts_utils import get_clip_cls_embeddings, get_clip_patch_embeddings, compute_batch_embeddings, compute_avg_concept_vectors, compute_cosine_sims, get_llama_patch_embeddings, get_llama_cls_embeddings
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.general_utils import load_images
+from utils.compute_concepts_utils import get_clip_cls_embeddings, get_clip_patch_embeddings, compute_batch_embeddings, compute_avg_concept_vectors, compute_cosine_sims, get_llama_patch_embeddings, get_llama_cls_embeddings
 
 
 PERCENT_THRU_MODEL = 100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATASET_NAMES = ['CLEVR', 'Coco']
+DATASET_NAMES = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces']
 scratch_dir=''
 
 
@@ -22,7 +22,7 @@ CLIP_MODEL = CLIPModel.from_pretrained(clip_model_name).to(DEVICE)
 CLIP_MODEL.eval()
 CLIP_INPUT_IMAGE_SIZE = (224, 224)
 
-#for llama
+# #for llama
 llama_model_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_MODEL = MllamaForConditionalGeneration.from_pretrained(llama_model_id, torch_dtype=torch.float16, device_map="auto")
 LLAMA_PROCESSOR = AutoProcessor.from_pretrained(llama_model_id)

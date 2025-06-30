@@ -16,17 +16,17 @@ from matplotlib.ticker import ScalarFormatter
 import ast
 
 import importlib
-import general_utils
-import text_visualization_utils
-import patch_alignment_utils
-importlib.reload(patch_alignment_utils)
-importlib.reload(general_utils)
-importlib.reload(text_visualization_utils)
+import utils.general_utils
+import utils.text_visualization_utils
+import utils.patch_alignment_utils
+importlib.reload(utils.patch_alignment_utils)
+importlib.reload(utils.general_utils)
+importlib.reload(utils.text_visualization_utils)
 
-from general_utils import compute_cossim_w_vector, get_split_df, create_binary_labels, retrieve_topn_images_byconcepts
-from patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence, get_image_idx_from_global_patch_idx, compute_patches_per_image
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices
-from text_visualization_utils import get_glob_tok_indices_from_sent_idx, get_sent_idx_from_global_token_idx
+from utils.general_utils import compute_cossim_w_vector, get_split_df, create_binary_labels, retrieve_topn_images_byconcepts
+from utils.patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence, get_image_idx_from_global_patch_idx, compute_patches_per_image
+from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices
+from utils.text_visualization_utils import get_glob_tok_indices_from_sent_idx, get_sent_idx_from_global_token_idx
 
 ############# Find Thresholds for Concepts #############
 def compute_avg_rand_threshold(embeddings, patch_indices, percentile, n_vectors=5, device="cuda"):
@@ -1443,7 +1443,10 @@ def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, da
     # Save the DataFrame as a CSV file
     if just_obj:
         if baseline_type:
-            save_path = f'Quant_Results/{dataset_name}/{baseline_type}_justobj_{con_label}.csv'
+            if 'inversion_' in baseline_type and invert_percentile is not None:
+                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_justobj_per_{invert_percentile*100}.csv'
+            else:
+                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_justobj.csv'
         else:
             if detect_percentile is not None:
                 save_path = f'Quant_Results/{dataset_name}/justobj_detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{con_label}.csv'
@@ -1451,7 +1454,10 @@ def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, da
                 save_path = f'Quant_Results/{dataset_name}/justobj_per_{invert_percentile*100}_{con_label}.csv'
     else:
         if baseline_type:
-            save_path = f'Quant_Results/{dataset_name}/{baseline_type}_{con_label}.csv'
+            if 'inversion_' in baseline_type and invert_percentile is not None:
+                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_per_{invert_percentile*100}.csv'
+            else:
+                save_path = f'Quant_Results/{dataset_name}/{baseline_type}.csv'
         else:
             if detect_percentile is not None:
                 save_path = f'Quant_Results/{dataset_name}/detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{con_label}.csv'
@@ -1463,6 +1469,122 @@ def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, da
 #     print(f"Metrics saved to {save_path} :)")
     
     return metrics_df
+
+
+def inversion_baselines(
+    dataset_name,
+    model_input_size,
+    con_label,
+    device,
+    patch_size=14
+):
+    """
+    Compute inversion baseline metrics for random, always positive, and always negative predictions
+    at the patch level. Handles data loading and filtering internally.
+    
+    Args:
+        dataset_name: Name of dataset
+        model_input_size: Model input dimensions
+        con_label: Concept label (e.g., 'CLIP_patch')
+        device: Torch device
+        patch_size: Patch size for vision models
+    """
+    print(f"Computing inversion baselines for {dataset_name}")
+    
+    # Load ALL gt_patches (not just test) to create complete labels
+    all_gt_patches_file = f'GT_Samples/{dataset_name}/gt_patches_per_concept_inputsize_{model_input_size}.pt'
+    concepts = torch.load(all_gt_patches_file, weights_only=False)
+    print(f"Loaded ALL gt_patches with {len(concepts)} concepts")
+    
+    # Determine total dataset size D for create_binary_labels
+    if model_input_size[0] == 'text':
+        # For text models, get total number of tokens
+        token_counts = torch.load(f'GT_Samples/{dataset_name}/token_counts.pt')
+        D = sum(sum(x) for x in token_counts)
+    else:
+        # For vision models, calculate total patches from max patch index
+        all_patch_indices = set()
+        for concept_patches in concepts.values():
+            all_patch_indices.update(concept_patches)
+        D = max(all_patch_indices) + 1 if all_patch_indices else 0
+    
+    print(f"Total dataset size D = {D}")
+    
+    all_concept_labels = create_binary_labels(D, concepts)
+    print(f"Created labels for all patches: {[f'{concept}: {labels.sum().item()}/{len(labels)} positive' for concept, labels in list(all_concept_labels.items())[:3]]}")
+    
+    # Get patch split information and filter to test split only
+    split_df = get_patch_split_df(dataset_name, model_input_size, patch_size=patch_size)
+    print(f"Loaded split info for {len(split_df)} patches/tokens")
+    
+    # Filter to test split only
+    test_mask = split_df == 'test'
+    test_indices = test_mask[test_mask].index
+    
+    # Further filter to exclude padding patches (for vision models)
+    if model_input_size[0] != 'text':
+        relevant_indices = filter_patches_by_image_presence(test_indices, dataset_name, model_input_size)
+    else:
+        relevant_indices = torch.tensor(test_indices)
+    
+    print(f"Using {len(relevant_indices)} test patches/tokens (after filtering)")
+    
+    relevant_indices_list = relevant_indices.tolist()
+    concept_keys = list(concepts.keys())
+    n_concepts = len(concept_keys)
+    n_samples = len(relevant_indices)
+    
+    # Prepare ground truth masks
+    gt_masks_all = torch.zeros((n_samples, n_concepts), dtype=torch.bool, device=device)
+    for i, concept in enumerate(concept_keys):
+        vals = all_concept_labels[concept][relevant_indices_list]
+        if isinstance(vals, torch.Tensor):
+            mask = (vals == 1).clone().detach().to(device)
+        else:
+            mask = torch.tensor(vals == 1, device=device)
+        gt_masks_all[:, i] = mask
+    
+    # Baseline types to compute
+    baseline_types = ['random', 'always_positive', 'always_negative']
+    
+    for baseline_type in baseline_types:
+        print(f"Computing {baseline_type} baseline...")
+        
+        # Generate baseline predictions based on type
+        if baseline_type == 'random':
+            # Random 50/50 predictions
+            activated_patches = torch.rand((n_samples, n_concepts), device=device) < 0.5
+        elif baseline_type == 'always_positive':
+            # All predictions above threshold (all positive)
+            activated_patches = torch.ones((n_samples, n_concepts), dtype=torch.bool, device=device)
+        elif baseline_type == 'always_negative':
+            # All predictions below threshold (all negative)
+            activated_patches = torch.zeros((n_samples, n_concepts), dtype=torch.bool, device=device)
+        
+        # Compute confusion matrix elements
+        tp_counts = torch.sum(activated_patches & gt_masks_all, dim=0)
+        fn_counts = torch.sum((~activated_patches) & gt_masks_all, dim=0)
+        fp_counts = torch.sum(activated_patches & (~gt_masks_all), dim=0)
+        tn_counts = torch.sum((~activated_patches) & (~gt_masks_all), dim=0)
+        
+        # Convert to dictionary format
+        tp_count = {concept_keys[i]: tp_counts[i].item() for i in range(n_concepts)}
+        fn_count = {concept_keys[i]: fn_counts[i].item() for i in range(n_concepts)}
+        fp_count = {concept_keys[i]: fp_counts[i].item() for i in range(n_concepts)}
+        tn_count = {concept_keys[i]: tn_counts[i].item() for i in range(n_concepts)}
+        
+        # Compute metrics using existing function
+        baseline_name = f"inversion_{baseline_type}_{con_label}_baseline"
+        compute_concept_metrics(
+            fp_count, fn_count, tp_count, tn_count,
+            concept_keys, dataset_name, con_label,
+            just_obj=False,
+            baseline_type=baseline_name
+        )
+        
+        print(f"✓ Completed {baseline_type} baseline for {dataset_name}")
+    
+    print(f"✓ All inversion baselines completed for {dataset_name}")
 
 
 def compute_metrics_across_percentiles(gt_patches_per_concept_test, concepts, sim_metrics, model_input_size, dataset_name, 

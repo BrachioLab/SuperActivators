@@ -8,10 +8,8 @@ from collections import defaultdict
 from tqdm import tqdm
 
 # Import the required utility functions
-import sys
-sys.path.append('/shared_data0/cgoldberg/Concept_Inversion/Experiments/utils')
-from general_utils import get_split_df, create_binary_labels
-from patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
+from .general_utils import get_split_df, create_binary_labels
+from .patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
 
 
 def get_false_positive_indices(dataset_name, model_name, sample_type, concept, 
@@ -142,7 +140,7 @@ def get_false_positive_indices(dataset_name, model_name, sample_type, concept,
     if model_input_size == ('text', 'text'):
         if sample_type == 'cls':
             # For CLS, use the proper function that handles sentence-level activations
-            from quant_concept_evals_utils import find_activated_images_byimage
+            from .quant_concept_evals_utils import find_activated_images_byimage
             # Need to create thresholds for all concepts, but we only care about our target concept
             all_concept_thresholds = {}
             for col in act_metrics.columns:
@@ -156,7 +154,7 @@ def get_false_positive_indices(dataset_name, model_name, sample_type, concept,
             )
         else:
             # For patch/token level, use the existing token aggregation function
-            from quant_concept_evals_utils import find_activated_sentences_bytoken
+            from .quant_concept_evals_utils import find_activated_sentences_bytoken
             # Need to create thresholds for all concepts, but we only care about our target concept
             all_concept_thresholds = {}
             for col in act_metrics.columns:
@@ -172,7 +170,7 @@ def get_false_positive_indices(dataset_name, model_name, sample_type, concept,
         # For image datasets, use different functions based on sample_type
         if sample_type == 'cls':
             # For CLS, use image-level detection directly
-            from quant_concept_evals_utils import find_activated_images_byimage
+            from .quant_concept_evals_utils import find_activated_images_byimage
             # Need to create thresholds for all concepts, but we only care about our target concept
             all_concept_thresholds = {}
             for col in act_metrics.columns:
@@ -186,7 +184,7 @@ def get_false_positive_indices(dataset_name, model_name, sample_type, concept,
             )
         else:
             # For patch level, use patch max-pooling to get image-level detection
-            from quant_concept_evals_utils import find_activated_images_bypatch
+            from .quant_concept_evals_utils import find_activated_images_bypatch
             # Need to create thresholds for all concepts, but we only care about our target concept
             all_concept_thresholds = {}
             for col in act_metrics.columns:

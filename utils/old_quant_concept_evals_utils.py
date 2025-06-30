@@ -15,17 +15,10 @@ from matplotlib.ticker import ScalarFormatter
 import ast
 
 import importlib
-import general_utils
-import text_visualization_utils
-import patch_alignment_utils
-importlib.reload(patch_alignment_utils)
-importlib.reload(general_utils)
-importlib.reload(text_visualization_utils)
-
-from general_utils import compute_cossim_w_vector, get_split_df, create_binary_labels, retrieve_topn_images_byconcepts
-from patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence, get_image_idx_from_global_patch_idx, compute_patches_per_image
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices
-from text_visualization_utils import get_glob_tok_indices_from_sent_idx, get_sent_idx_from_global_token_idx
+from .general_utils import compute_cossim_w_vector, get_split_df, create_binary_labels, retrieve_topn_images_byconcepts
+from .patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence, get_image_idx_from_global_patch_idx, compute_patches_per_image
+from .gt_concept_segmentation_utils import map_concepts_to_patch_indices
+from .text_visualization_utils import get_glob_tok_indices_from_sent_idx, get_sent_idx_from_global_token_idx
 
 ############# Find Thresholds for Concepts #############
 def compute_avg_rand_threshold(embeddings, patch_indices, percentile, n_vectors=5, device="cuda"):

@@ -5,10 +5,10 @@ import torch
 from transformers import MllamaForConditionalGeneration
 from transformers import AutoProcessor
 
-sys.path.append(os.path.abspath("utils"))
-from compute_concepts_utils import compute_batch_embeddings, get_llama_text_patch_embeddings, get_llama_text_cls_embeddings
-from general_utils import load_text
-from gt_concept_segmentation_utils import compute_attention_masks, map_sentence_to_concept_gt
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.compute_concepts_utils import compute_batch_embeddings, get_llama_text_patch_embeddings, get_llama_text_cls_embeddings
+from utils.general_utils import load_text
+from utils.gt_concept_segmentation_utils import compute_attention_masks, map_sentence_to_concept_gt
 
 
 PERCENT_THRU_MODEL = 100

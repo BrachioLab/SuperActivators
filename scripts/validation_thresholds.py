@@ -6,29 +6,27 @@ import sys
 import os
 from collections import defaultdict
 from itertools import product
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators
-from unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, \
-find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
+from utils.compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators, \
+     compute_zscore_stats, apply_zscore_normalization
+from utils.unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
 compute_concept_thresholds_over_percentiles_all_pairs
-from superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, \
+from utils.superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, \
      detect_then_invert_locally_metrics_over_percentiles
-from quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
+from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles
+from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
 
 
 MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'))]
 DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']
 SAMPLE_TYPES = [('cls', 50), ('patch', 1000)]
-DATASETS = ['iSarcasm']
-
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PERCENT_THRU_MODEL = 100
 SCRATCH_DIR = ''
 PERCENTILES = [0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
-BATCH_SIZE = 200
+BATCH_SIZE = 300
 
 
 def get_files_for_avg(model_name, n_clusters, sample_type):
@@ -94,41 +92,77 @@ def get_all_files(model_name, n_clusters, sample_type):
     all_files.append(get_files_for_linsep_kmeans(model_name, n_clusters, sample_type))
     return all_files
     
-     
+
+def get_cluster_labels(dataset_name, kmeans_concept_file):
+    print("loading gt clusters from kmeans")
+    train_cluster_to_samples = torch.load(f'Concepts/{dataset_name}/train_samples_{kmeans_concept_file}')
+    test_cluster_to_samples = torch.load(f'Concepts/{dataset_name}/test_samples_{kmeans_concept_file}')
+    cluster_to_samples = defaultdict(list)
+    for cluster, samples in train_cluster_to_samples.items():
+        cluster_to_samples[cluster].extend(samples)
+    for cluster, samples in test_cluster_to_samples.items():
+        cluster_to_samples[cluster].extend(samples)
+    for cluster in cluster_to_samples:
+        cluster_to_samples[cluster] = sorted(cluster_to_samples[cluster])
+    cluster_to_samples = dict(cluster_to_samples)
+    return cluster_to_samples
+
+
+
+
+def get_act_metrics(dataset_name, acts_file):
+    if 'linsep' in acts_file:
+        print("Loading distances...")
+        dists = pd.read_csv(f"{SCRATCH_DIR}Distances/{dataset_name}/{acts_file}") 
+        return dists
+    
+    else:
+        print("Loading cosine similarities...")
+        cos_sims = pd.read_csv(f"{SCRATCH_DIR}Cosine_Similarities/{dataset_name}/{acts_file}")
+        return cos_sims
+      
 
 
 if __name__ == "__main__":
     experiment_configs = product(MODELS, DATASETS, SAMPLE_TYPES)
     for (model_name, model_input_size), dataset_name, (sample_type, n_clusters) in experiment_configs:
-        all_files = get_all_files(model_name, n_clusters, sample_type)
+        # Skip invalid dataset-input size combinations
         if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
             continue
         if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
             continue
+
         
+        
+        print(f"Processing model {model_name} dataset {dataset_name} sample type {sample_type}")
+        #get gt values from calibration dataset
+        if sample_type == 'patch':   
+            gt_samples_per_concept_cal = torch.load(f"GT_Samples/{dataset_name}/gt_patch_per_concept_cal_inputsize_{model_input_size}.pt")   
+        else:
+            gt_samples_per_concept_cal = torch.load(f"GT_Samples/{dataset_name}/gt_samples_per_concept_cal_inputsize_{model_input_size}.pt")
+        
+  
+        all_files = get_all_files(model_name, n_clusters, sample_type)
         for con_label, embeddings_file, concepts_file, acts_file in all_files:
-            print(f"Processing model {model_name} dataset {dataset_name} sample type {sample_type}")
-            print(con_label)
-            
-            print("Loading embeddings...")
-            embeds_dic = torch.load(f"{SCRATCH_DIR}Embeddings/{dataset_name}/{embeddings_file}")
-            embeds = embeds_dic['normalized_embeddings'] 
-            
-            
+            #load concepts
             concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
-
-            if 'linsep' in acts_file:
-                compute_signed_distances(embeds, concepts, dataset_name, DEVICE,
-                                            acts_file, SCRATCH_DIR, BATCH_SIZE)
-                torch.cuda.empty_cache()            
-                torch.cuda.ipc_collect()           
-
+            
+            #compute raw act metrics with cal embeds and concept
+            act_metrics = get_act_metrics(dataset_name, acts_file)
+            
+            print(act_metrics.shape)
+      
+            #compute threshold for those concepts
+            if 'kmeans' in con_label:
+                print("computing thresholds over percentiles")
+                # cluster_labels = get_cluster_labels(dataset_name[:-4], concepts_file)
+                compute_concept_thresholds_over_percentiles_all_pairs(act_metrics, 
+                                                                      gt_samples_per_concept_cal, 
+                                                                      PERCENTILES, DEVICE,
+                                                                      dataset_name, con_label)  
             else:
-                compute_cosine_sims(embeddings = embeds, 
-                                            concepts = concepts, 
-                                            output_file = acts_file,
-                                            dataset_name = dataset_name, device=DEVICE,
-                                            batch_size=BATCH_SIZE, scratch_dir=SCRATCH_DIR)
-                torch.cuda.empty_cache()            
-                torch.cuda.ipc_collect()
-                
+                print("computing thresholds over percentiles")
+                compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, 
+                                                            act_metrics, PERCENTILES, DEVICE, 
+                                                            dataset_name, con_label, n_vectors=1,
+                                                            n_concepts_to_print=0)

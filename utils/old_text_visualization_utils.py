@@ -10,7 +10,7 @@ import matplotlib.cm as cm
 import io
 import base64
 import numpy as np
-from general_utils import get_split_df
+from .general_utils import get_split_df
 from itertools import chain
 
 #### Computations ####

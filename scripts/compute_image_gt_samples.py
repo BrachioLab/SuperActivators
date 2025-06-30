@@ -2,7 +2,7 @@ import torch
 import sys
 import os
 from itertools import product
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath("../utils"))
 
 import gt_concept_segmentation_utils
 

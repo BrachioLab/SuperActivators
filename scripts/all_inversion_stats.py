@@ -6,16 +6,16 @@ import sys
 import os
 from collections import defaultdict
 from itertools import product
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import gc
 
-from compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators, compute_avg_concept_vectors, gpu_kmeans
-from unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
+from utils.compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators, compute_avg_concept_vectors, gpu_kmeans
+from utils.unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
 compute_concept_thresholds_over_percentiles_all_pairs
-from superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, \
+from utils.superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, \
      detect_then_invert_locally_metrics_over_percentiles
-from quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles, compute_detection_metrics_over_percentiles
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
+from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles, compute_detection_metrics_over_percentiles
+from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
 
 
 
@@ -23,7 +23,7 @@ MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'
 DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']
 SAMPLE_TYPES = [('patch', 1000)]
 
-DATASETS = ['Broden-OpenSurfaces']
+DATASETS = ['Broden-Pascal']
 MODELS = [('Llama', (560, 560))]
 
 
@@ -147,13 +147,14 @@ if __name__ == "__main__":
         embeds = embeds_dic['normalized_embeddings']
     
         all_files = get_all_files(model_name, sample_type, n_clusters)
-        for con_label, _, concepts_file, acts_file in all_files:
+        for con_label, _, concepts_file, acts_file in all_files:  
+            if 'kmeans' not in con_label:
+                continue
             print(con_label)
             #get act metrics
             act_metrics = get_act_metrics(dataset_name, acts_file)
             
             if 'kmeans' in con_label: #unsupervised concepts
-                continue
                 concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
                 
                 matched_acts, matched_gt_patches_per_concept_test, \
@@ -189,12 +190,12 @@ if __name__ == "__main__":
                 
             else: #supervised concepts
                 concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
-                if 'avg' not in con_label:
-                    detect_then_invert_metrics_over_percentiles(PERCENTILES, PERCENTILES, 
-                                                    act_metrics, concepts, gt_patches_per_concept, gt_patches_per_concept_test,
-                                                    DEVICE, dataset_name, model_input_size, con_label, 
-                                                    all_object_patches=None,
-                                                    patch_size=14)
+                detect_then_invert_metrics_over_percentiles(PERCENTILES, PERCENTILES, 
+                                                act_metrics, concepts, gt_patches_per_concept, gt_patches_per_concept_test,
+                                                DEVICE, dataset_name, model_input_size, con_label, 
+                                                all_object_patches=None,
+                                                patch_size=14)
+
                 all_superdetector_inversions_across_percentiles(PERCENTILES, 'avg', embeds, act_metrics,
                                    gt_patches_per_concept_test, dataset_name, model_input_size, con_label, 
                                                 DEVICE, patch_size=14, local=True)

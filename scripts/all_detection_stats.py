@@ -2,26 +2,25 @@ import torch
 import torch.nn.functional as F
 import pandas as pd
 from tqdm import tqdm
-import sys
 import os
 import gc
 from collections import defaultdict
 from itertools import product
-sys.path.append(os.path.abspath("utils"))
+import sys
 
-from compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators, compute_avg_concept_vectors, gpu_kmeans
-from unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
-compute_concept_thresholds_over_percentiles_all_pairs
-from superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, \
-     detect_then_invert_locally_metrics_over_percentiles
-from quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles, compute_detection_metrics_over_percentiles
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from utils.compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators, compute_avg_concept_vectors
+from utils.unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, compute_concept_thresholds_over_percentiles_all_pairs
+from utils.superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, detect_then_invert_locally_metrics_over_percentiles
+from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles, compute_detection_metrics_over_percentiles
+from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
 
 
 MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'))]
 DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']
 SAMPLE_TYPES = [('cls', 50), ('patch', 1000)]
-DATASETS = ['iSarcasm']
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PERCENT_THRU_MODEL = 100
@@ -207,4 +206,4 @@ if __name__ == "__main__":
                         
             del act_metrics
             gc.collect()
-            
+

@@ -5,10 +5,8 @@ from collections import defaultdict
 from tqdm import tqdm
 
 # Import the required utility functions
-import sys
-sys.path.append('/shared_data0/cgoldberg/Concept_Inversion/Experiments/utils')
-from general_utils import get_split_df
-from false_positive_extractor import get_false_positive_indices
+from .general_utils import get_split_df
+from .false_positive_extractor import get_false_positive_indices
 
 
 def calculate_f1_for_percentile(dataset_name, model_name, sample_type, concept, 

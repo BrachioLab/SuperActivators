@@ -14,14 +14,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-import sys
-import os
-sys.path.append(os.path.abspath("utils"))
-
-from patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
-from quant_concept_evals_utils import find_activated_images_bypatch, compute_concept_thresholds_over_percentiles
-from general_utils import create_binary_labels
-from compute_concepts_utils import plot_train_history, compute_signed_distances, create_dataloaders, create_linear_model, sort_data_by_split, evaluate_model, log_progress, create_dataloader
+from .patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
+from .quant_concept_evals_utils import find_activated_images_bypatch, compute_concept_thresholds_over_percentiles
+from .general_utils import create_binary_labels
+from .compute_concepts_utils import plot_train_history, compute_signed_distances, create_dataloaders, create_linear_model, sort_data_by_split, evaluate_model, log_progress, create_dataloader
 
 ### For Detection ###
 # def compute_all_f1s_by_concept_and_percentile(sim_metrics, 
