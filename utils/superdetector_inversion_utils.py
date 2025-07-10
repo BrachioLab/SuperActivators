@@ -1,9 +1,9 @@
 import torch
 import pandas as pd
 from tqdm import tqdm
+import os
 
 import sys
-import os
 sys.path.append(os.path.abspath("utils"))
 
 
@@ -14,12 +14,12 @@ import matplotlib.cm as cm
 import torch.nn.functional as F
 import seaborn as sns
 
-from quant_concept_evals_utils import compute_concept_thresholds, compute_concept_metrics, \
+from utils.quant_concept_evals_utils import compute_concept_thresholds, compute_concept_metrics, \
      create_binary_labels, get_patch_detection_tensor
-from patch_alignment_utils import filter_patches_by_image_presence, get_patch_range_for_image, get_patch_range_for_text, \
+from utils.patch_alignment_utils import filter_patches_by_image_presence, get_patch_range_for_image, get_patch_range_for_text, \
      calculate_patch_location, get_patch_split_df
-from general_utils import pad_or_resize_img
-from unsupervised_utils  import match_thresholds_across_percentiles
+from utils.general_utils import pad_or_resize_img
+from utils.unsupervised_utils  import match_thresholds_across_percentiles
 
 ### Reasoning about superpatches ####
 # def find_superdetector_patches(sample_idx, percentile, act_metrics, gt_samples_per_concept_test, 
@@ -82,7 +82,7 @@ from unsupervised_utils  import match_thresholds_across_percentiles
 #         superdetectors_per_concept[concept] = superdetector_patch_indices
 
 #     return superdetectors_per_concept
-def find_superdetector_patches(sample_idx, percentile, act_metrics, gt_samples_per_concept_test, 
+def find_superdetector_patches(sample_idx, percentile, act_metrics, gt_samples_per_concept_cal, 
                                 dataset_name, model_input_size, con_label, device):
     """
     Identifies superdetector patches for a single image by selecting patches whose concept
@@ -125,6 +125,25 @@ def find_superdetector_patches(sample_idx, percentile, act_metrics, gt_samples_p
         all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         matched_thresholds = match_thresholds_across_percentiles(all_thresholds, dataset_name, con_label)
         thresholds = matched_thresholds[percentile]
+        
+        # Handle potential column name mismatch
+        # Check if actmetrics columns are concept names instead of cluster IDs
+        alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
+        if os.path.exists(alignment_path):
+            alignment_results = torch.load(alignment_path, weights_only=False)
+            concept_to_cluster = {concept: str(info['best_cluster']) 
+                                  for concept, info in alignment_results.items()}
+            
+            # If columns are concept names but thresholds are keyed by cluster IDs
+            if hasattr(act_metrics, 'columns'):
+                first_col = str(act_metrics.columns[0])
+                if first_col in concept_to_cluster and first_col not in thresholds:
+                    # Remap thresholds to use concept names
+                    threshold_lookup = {}
+                    for concept, cluster_id in concept_to_cluster.items():
+                        if cluster_id in thresholds:
+                            threshold_lookup[concept] = thresholds[cluster_id]
+                    thresholds = threshold_lookup
     else:
         thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)[percentile]
 
@@ -148,8 +167,8 @@ def find_superdetector_patches(sample_idx, percentile, act_metrics, gt_samples_p
     return superdetectors_per_concept
 
 
-def find_all_superdetector_patches(percentile, act_metrics, dataset_name, 
-                                   model_input_size, con_label, device):
+def find_all_superdetector_patches(percentile, act_metrics,
+                                   dataset_name, model_input_size, con_label, device):
     """
     Identifies superdetector patches for the entire dataset based on percentile thresholds 
     and saves them to disk.
@@ -157,7 +176,6 @@ def find_all_superdetector_patches(percentile, act_metrics, dataset_name,
     Args:
         percentile (float): Percentile threshold to select top concept-activated patches.
         act_metrics (pd.DataFrame): Activation metrics for each patch and concept.
-        gt_samples_per_concept_test (dict): Mapping of concepts to ground truth positive image indices.
         dataset_name (str): Name of the dataset (used for output path).
         model_input_size (tuple): Size of model input (e.g., (224, 224)).
         con_label (str): Concept label name for output file.
@@ -180,6 +198,24 @@ def find_all_superdetector_patches(percentile, act_metrics, dataset_name,
         all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         matched_thresholds =  match_thresholds_across_percentiles(all_thresholds, dataset_name, con_label)
         thresholds = matched_thresholds[percentile]
+        
+        # Handle potential column name mismatch
+        # Check if actmetrics columns are concept names instead of cluster IDs
+        alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
+        if os.path.exists(alignment_path):
+            alignment_results = torch.load(alignment_path, weights_only=False)
+            concept_to_cluster = {concept: str(info['best_cluster']) 
+                                  for concept, info in alignment_results.items()}
+            
+            # If columns are concept names but thresholds are keyed by cluster IDs
+            first_col = str(act_metrics.columns[0])
+            if first_col in concept_to_cluster and first_col not in thresholds:
+                # Remap thresholds to use concept names
+                threshold_lookup = {}
+                for concept, cluster_id in concept_to_cluster.items():
+                    if cluster_id in thresholds:
+                        threshold_lookup[concept] = thresholds[cluster_id]
+                thresholds = threshold_lookup
     else:
         thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)[percentile]
 
@@ -304,7 +340,7 @@ def superdetector_inversion(sample_idx, percentile, agglomerate_type, embeds, ac
 
 
 def batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_metrics,
-                                      gt_samples_per_concept_test, dataset_name, model_input_size,
+                                      gt_samples_per_concept_cal, dataset_name, model_input_size,
                                       con_label, device, patch_size=14, local=False):
     """
     Computes inversion maps (cosine similarities to superdetector vectors) for all patches and concepts,
@@ -315,7 +351,7 @@ def batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_met
         agglomerate_type (str): Aggregation method ('avg' or 'max') for computing concept vectors.
         embeds (torch.Tensor): All patch embeddings (shape: [n_patches, embed_dim]).
         act_metrics (pd.DataFrame): Activation scores for each patch and concept (shape: [n_patches, n_concepts]).
-        gt_samples_per_concept_test (dict): Mapping from concept -> list of test image indices (used in thresholding).
+        gt_samples_per_concept_cal (dict): Mapping from concept -> list of calibration image indices (used in thresholding).
         dataset_name (str): Dataset name for filtering and thresholding.
         model_input_size (tuple): Image size (e.g., (224, 224)).
         con_label (str): Concept category name (used for thresholding).
@@ -332,7 +368,7 @@ def batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_met
     concept_names = act_metrics.columns.tolist()
     if model_input_size[0] == 'text':
         # Load precomputed patch counts per sample (i.e., token counts)
-        patch_counts_per_sample = torch.load(f'GT_Samples/{dataset_name}/token_counts.pt', weights_only=False)
+        patch_counts_per_sample = torch.load(f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt', weights_only=False)
         num_patches_per_sample = [sum(x) for x in patch_counts_per_sample]
         sample_boundaries = [(0, num_patches_per_sample[0])]
         for count in num_patches_per_sample[1:]:
@@ -350,7 +386,7 @@ def batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_met
     global_superdetectors = None
     if not local:
         global_superdetectors = find_all_superdetector_patches(
-            percentile, act_metrics, gt_samples_per_concept_test,
+            percentile, act_metrics, gt_samples_per_concept_cal,
             dataset_name, model_input_size, con_label, device
         )
 
@@ -360,7 +396,7 @@ def batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_met
     for sample_idx, (start_idx, end_idx) in enumerate(sample_boundaries):
         if local:
             superdetectors_per_concept = find_superdetector_patches(
-                sample_idx, percentile, act_metrics, gt_samples_per_concept_test,
+                sample_idx, percentile, act_metrics, gt_samples_per_concept_cal,
                 dataset_name, model_input_size, con_label, device
             )
         else:
@@ -387,17 +423,29 @@ def batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_met
         flat_scores[concept] = torch.cat(flat_scores[concept], dim=0).numpy()
 
     df = pd.DataFrame(flat_scores)
+    
+    # Debug: Check if kmeans results are zero
+    if 'kmeans' in con_label:
+        non_zero_count = (df != 0).sum().sum()
+        total_count = df.shape[0] * df.shape[1]
+        print(f"DEBUG: kmeans superpatch - non-zero: {non_zero_count}/{total_count}")
+        if non_zero_count == 0:
+            print("WARNING: All values are zero before saving!")
+            # Check one concept
+            first_concept = df.columns[0]
+            print(f"First concept '{first_concept}' stats: min={df[first_concept].min()}, max={df[first_concept].max()}")
+    
     df.to_csv(f'Superpatches/{dataset_name}/superpatch_{agglomerate_type}_inv_per_{percentile}_{con_label}.csv', index=False)
     
     return df
 
 
 def all_superdetector_inversions_across_percentiles(percentiles, agglomerate_type, embeds, act_metrics,
-                                   gt_samples_per_concept_test, dataset_name, model_input_size,
+                                   gt_samples_per_concept_cal, dataset_name, model_input_size,
                                    con_label, device, patch_size=14, local=False):
     for percentile in tqdm(percentiles):
         batch_superdetector_inversions(percentile, agglomerate_type, embeds, act_metrics,
-                                       gt_samples_per_concept_test, dataset_name, model_input_size,
+                                       gt_samples_per_concept_cal, dataset_name, model_input_size,
                                        con_label, device, patch_size, local)
 
 
@@ -555,7 +603,7 @@ def superdetector_inversion_across_percentiles(percentiles, img_idx, all_images,
 
 ### Quantiative Evals ###
 def detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act_metrics, concepts, 
-                               gt_samples_per_concept, gt_samples_per_concept_test, device, dataset_name, 
+                               gt_samples_per_concept, gt_samples_per_concept_cal, device, dataset_name, 
                                model_input_size, con_label, all_object_patches=None, 
                                patch_size=14, agglomerate_type='avg'):
     """
@@ -613,7 +661,30 @@ def detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act
     
     #invert based on superpatches for given percentile
     inversion_activations = pd.read_csv(f'Superpatches/{dataset_name}/superpatch_{agglomerate_type}_inv_per_{invert_percentile}_{con_label}.csv')
-    inversion_thresholds = compute_concept_thresholds(gt_samples_per_concept_test, 
+    
+    # Handle column name mismatch for unsupervised methods
+    if 'kmeans' in con_label:
+        # Check if there's a mismatch between activation columns and ground truth keys
+        gt_keys = set(str(k) for k in gt_samples_per_concept_cal.keys())
+        act_cols = set(inversion_activations.columns)
+        
+        # If no overlap, we need to map columns
+        if not gt_keys.intersection(act_cols):
+            # Load alignment to get mapping
+            alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
+            
+            # Create mapping from current column names to what ground truth expects
+            col_mapping = {}
+            for concept_name, info in alignment_results.items():
+                cluster_id = str(info['best_cluster'])
+                if cluster_id in act_cols:
+                    col_mapping[cluster_id] = concept_name  # Map cluster ID to concept name
+            
+            # Rename columns if needed
+            if col_mapping:
+                inversion_activations = inversion_activations.rename(columns=col_mapping)
+    
+    inversion_thresholds = compute_concept_thresholds(gt_samples_per_concept_cal, 
                                                 inversion_activations, invert_percentile, n_vectors=1, device=device, 
                                                 n_concepts_to_print=0, dataset_name=dataset_name, con_label=con_label)
     
@@ -627,18 +698,21 @@ def detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act
     # Get the split dataframe.
     split_df = get_patch_split_df(dataset_name, patch_size=patch_size, model_input_size=model_input_size)
     
-    # Get test indices as a torch tensor.
-    test_indices = torch.tensor(split_df.index[split_df == 'test'].tolist())
+    # Get calibration indices as a torch tensor.
+    cal_indices = torch.tensor(split_df.index[split_df == 'cal'].tolist())
     
     #filter patches that are 'padding' given the preprocessing schemes
-    relevant_indices = filter_patches_by_image_presence(test_indices, dataset_name, model_input_size)
+    if model_input_size[0] == 'text':
+        relevant_indices = cal_indices
+    else:
+        relevant_indices = filter_patches_by_image_presence(cal_indices, dataset_name, model_input_size)
 
     # If filtering patches to ones that contain some concept, restrict to indices in all_object_patches.
     if all_object_patches is not None:
         relevant_indices = torch.tensor([int(idx.item()) for idx in relevant_indices if int(idx.item()) in all_object_patches])
     
-    # Get ground truth labels for all concepts.
-    all_concept_labels = create_binary_labels(len(split_df), gt_samples_per_concept)
+    # Get ground truth labels for all concepts - USE CALIBRATION GT
+    all_concept_labels = create_binary_labels(len(split_df), gt_samples_per_concept_cal)
   
     # Get a boolean DataFrame indicating whether each patch is part of an image that was 'detected'
     detected_patch_masks = get_patch_detection_tensor(act_metrics, detect_thresholds, model_input_size, dataset_name)
@@ -647,10 +721,10 @@ def detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act
     for concept, concept_labels in all_concept_labels.items():
         # Get activation values for the selected indices.
         relevant_indices_list = relevant_indices.tolist()
-        act_vals = torch.tensor(inversion_activations[concept].iloc[relevant_indices_list].values)
+        act_vals = torch.tensor(inversion_activations[concept].loc[relevant_indices_list].values)
         
         #only count patches from images that were first detected
-        detected_patches = torch.tensor(detected_patch_masks[concept].iloc[relevant_indices_list].values)
+        detected_patches = torch.tensor(detected_patch_masks[concept].loc[relevant_indices_list].values)
         activated_patches = (act_vals >= inversion_thresholds[concept][0]) &  detected_patches
 
         # Compute ground truth mask for these indices using the tensor directly.
@@ -678,7 +752,7 @@ def detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act
 
 
 def detect_then_invert_locally_metrics_over_percentiles(detect_percentiles, invert_percentiles, act_metrics, 
-                                                        concepts, gt_samples_per_concept, gt_samples_per_concept_test,
+                                                        concepts, gt_samples_per_concept, gt_samples_per_concept_cal,
                                                         device, dataset_name, model_input_size, con_label,
                                                         all_object_patches=None, patch_size=14,
                                                         agglomerate_type='avg'):
@@ -694,20 +768,272 @@ def detect_then_invert_locally_metrics_over_percentiles(detect_percentiles, inve
                 #     torch.load(f'Quant_Results/{dataset_name}/detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{con_label}.csv')
                 # except:
                 detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act_metrics, concepts, 
-                                   gt_samples_per_concept, gt_samples_per_concept_test, device, dataset_name, 
+                                   gt_samples_per_concept, gt_samples_per_concept_cal, device, dataset_name, 
                                    model_input_size, con_label, all_object_patches=None, 
                                    patch_size=14, agglomerate_type='avg')
                 # try:
                 #     torch.load(f'Quant_Results/{dataset_name}/justobj_detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{con_label}.csv')
                 # except:
-                detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act_metrics, concepts, 
-                                   gt_samples_per_concept, gt_samples_per_concept_test, device, dataset_name, 
-                                   model_input_size, con_label, all_object_patches=all_object_patches, 
-                                                   patch_size=14, agglomerate_type='avg')
+                # detect_then_invert_locally_metrics(detect_percentile, invert_percentile, act_metrics, concepts, 
+                #                    gt_samples_per_concept, gt_samples_per_concept_cal, device, dataset_name, 
+                #                    model_input_size, con_label, all_object_patches=all_object_patches, 
+                #                                    patch_size=14, agglomerate_type='avg')
                 pbar.update(1)
     pbar.close()
+
+
+def find_optimal_superdetector_thresholds(detect_percentiles, invert_percentiles, dataset_name, con_label, 
+                                          model_input_size, optimization_metric='f1', agglomerate_type='avg'):
+    """
+    Finds optimal detect/invert percentile pairs for superdetector method based on calibration results.
     
+    Args:
+        detect_percentiles: List of detect percentiles to search over
+        invert_percentiles: List of invert percentiles to search over  
+        dataset_name: Name of dataset
+        con_label: Concept label
+        model_input_size: Model input size for loading GT data
+        optimization_metric: Metric to optimize (default: 'f1')
+        agglomerate_type: Aggregation type for superdetector ('avg' or 'max')
+    """
+    print(f"Finding optimal superdetector thresholds based on {optimization_metric}...")
     
+    # Collect all concepts from calibration results
+    concepts = set()
+    
+    for detect_p in detect_percentiles:
+        for invert_p in invert_percentiles:
+            if detect_p <= invert_p:
+                filename = f"Quant_Results/{dataset_name}/detectfirst_{detect_p*100}_per_{invert_p*100}_superpatch_{agglomerate_type}_inv_{con_label}.csv"
+                try:
+                    df = pd.read_csv(filename)
+                    concepts.update(df['concept'].tolist())
+                    break
+                except FileNotFoundError:
+                    continue
+        if concepts:
+            break
+    
+    if not concepts:
+        print("No calibration results found for superdetector method. Cannot find optimal thresholds.")
+        return
+    
+    # Create directory for saving thresholds
+    os.makedirs(f'Detect_Invert_Thresholds/{dataset_name}', exist_ok=True)
+    
+    # Find optimal thresholds for each concept
+    for concept in concepts:
+        best_score = -float('inf')
+        best_detect_p = None
+        best_invert_p = None
+        
+        for detect_p in detect_percentiles:
+            for invert_p in invert_percentiles:
+                if detect_p <= invert_p:
+                    filename = f"Quant_Results/{dataset_name}/detectfirst_{detect_p*100}_per_{invert_p*100}_superpatch_{agglomerate_type}_inv_{con_label}.csv"
+                    try:
+                        df = pd.read_csv(filename)
+                        
+                        concept_row = df[df['concept'] == concept]
+                        if not concept_row.empty and optimization_metric in concept_row.columns:
+                            score = concept_row[optimization_metric].iloc[0]
+                            if score > best_score:
+                                best_score = score
+                                best_detect_p = detect_p
+                                best_invert_p = invert_p
+                    except FileNotFoundError:
+                        continue
+        
+        if best_detect_p is not None:
+            # Load the actual threshold values used for this concept
+            if 'kmeans' not in con_label:
+                all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+                detect_threshold = all_thresholds[best_detect_p][concept]
+            else:
+                # For unsupervised concepts, load matched thresholds
+                raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
+                alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
+                
+                # Get the cluster ID for this concept
+                cluster_id = alignment_results[concept]['best_cluster']
+                key = (concept, cluster_id)
+                
+                detect_threshold = raw_thresholds[best_detect_p][key] if key in raw_thresholds[best_detect_p] else None
+            
+            # For invert threshold, load from superdetector inversion results
+            inversion_filename = f'Superpatches/{dataset_name}/superpatch_{agglomerate_type}_inv_per_{best_invert_p}_{con_label}.csv'
+            try:
+                inversion_activations = pd.read_csv(inversion_filename)
+                # Compute invert threshold from calibration data
+                from utils.patch_alignment_utils import get_patch_split_df
+                from utils.general_utils import get_split_df
+                
+                # Load calibration GT
+                if model_input_size[0] == 'text':
+                    model_input_size_key = model_input_size
+                else:
+                    model_input_size_key = model_input_size
+                gt_patches_per_concept_cal = torch.load(f'GT_Samples/{dataset_name}/gt_patch_per_concept_cal_inputsize_{model_input_size_key}.pt')
+                
+                invert_threshold = compute_concept_thresholds(gt_patches_per_concept_cal, 
+                                                            inversion_activations, best_invert_p, n_vectors=1, 
+                                                            device='cpu', n_concepts_to_print=0, 
+                                                            dataset_name=dataset_name, con_label=con_label)[concept]
+            except FileNotFoundError:
+                print(f"Warning: Could not load inversion activations for {concept}")
+                invert_threshold = None
+            
+            # Save optimal thresholds
+            threshold_file = f'Detect_Invert_Thresholds/{dataset_name}/optimal_{optimization_metric}_superdetector_{con_label}_{concept}.pt'
+            optimal_thresholds_data = {
+                'detect_percentile': best_detect_p,
+                'invert_percentile': best_invert_p,
+                'detect_threshold': detect_threshold,
+                'invert_threshold': invert_threshold,
+                f'best_{optimization_metric}': best_score
+            }
+            torch.save(optimal_thresholds_data, threshold_file)
+            print(f"Saved optimal thresholds for {concept}: detect_p={best_detect_p}, invert_p={best_invert_p}, {optimization_metric}={best_score:.4f}")
+        else:
+            print(f"Warning: Could not find optimal thresholds for concept {concept}")
+
+
+def detect_then_invert_locally_with_optimal_thresholds(act_metrics, concepts, gt_samples_per_concept, 
+                                                      gt_samples_per_concept_test, device, dataset_name, 
+                                                      model_input_size, con_label, agglomerate_type='avg',
+                                                      all_object_patches=None, patch_size=14):
+    """
+    Evaluates superdetector inversion on test set using per-concept optimal thresholds.
+    
+    Args:
+        act_metrics: Activation metrics DataFrame
+        concepts: Concept vectors dictionary
+        gt_samples_per_concept: Full GT samples per concept
+        gt_samples_per_concept_test: Test split GT samples per concept
+        device: Device for computation
+        dataset_name: Name of dataset
+        model_input_size: Model input size
+        con_label: Concept label
+        agglomerate_type: Aggregation type for superdetector ('avg' or 'max')
+        all_object_patches: Object patches filter (optional)
+        patch_size: Patch size
+    """
+    print(f"Evaluating superdetector method on test set with optimal thresholds...")
+    
+    # Load optimal thresholds
+    optimal_thresholds = {}
+    concepts_list = list(concepts.keys()) if hasattr(concepts, 'keys') else list(gt_samples_per_concept_test.keys())
+    
+    for concept in concepts_list:
+        try:
+            threshold_file = f'Detect_Invert_Thresholds/{dataset_name}/optimal_f1_superdetector_{con_label}_{concept}.pt'
+            optimal_thresholds[concept] = torch.load(threshold_file, weights_only=False)
+        except FileNotFoundError:
+            print(f"Warning: No optimal threshold found for concept {concept}, skipping...")
+            continue
+    
+    if not optimal_thresholds:
+        print("No optimal thresholds found for any concept. Skipping superdetector test evaluation.")
+        return
+    
+    # Create a custom version of detect_then_invert_locally_metrics that uses actual thresholds instead of percentiles
+    # This avoids modifying the existing function signature
+    from utils.patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
+    from utils.general_utils import create_binary_labels
+    from utils.quant_concept_evals_utils import get_patch_detection_tensor, compute_concept_metrics
+    
+    # Get test split indices
+    split_df = get_patch_split_df(dataset_name, patch_size=patch_size, model_input_size=model_input_size)
+    test_indices = torch.tensor(split_df.index[split_df == 'test'].tolist())
+    
+    if model_input_size[0] == 'text':
+        relevant_indices = test_indices
+    else:
+        relevant_indices = filter_patches_by_image_presence(test_indices, dataset_name, model_input_size)
+    
+    if all_object_patches is not None:
+        relevant_indices = torch.tensor([int(idx.item()) for idx in relevant_indices if int(idx.item()) in all_object_patches])
+    
+    # Get ground truth labels - USE TEST GT
+    all_concept_labels = create_binary_labels(len(split_df), gt_samples_per_concept_test)
+    
+    # Initialize results storage
+    fp_counts = {}
+    fn_counts = {}
+    tp_counts = {}
+    tn_counts = {}
+    
+    # Process each concept with its optimal thresholds
+    for concept, threshold_info in optimal_thresholds.items():
+        detect_threshold = threshold_info['detect_threshold']
+        invert_threshold = threshold_info['invert_threshold']
+        
+        if detect_threshold is None or invert_threshold is None:
+            print(f"Skipping {concept} due to missing thresholds")
+            continue
+            
+        print(f"Evaluating concept {concept} with optimal thresholds on test set")
+        
+        # Get detection mask using detect threshold
+        detected_patches = get_patch_detection_tensor(
+            act_metrics, {concept: detect_threshold}, model_input_size, dataset_name
+        )[concept]
+        
+        # Load inversion activations for this concept at the optimal invert percentile
+        invert_p = threshold_info['invert_percentile']
+        inversion_filename = f'Superpatches/{dataset_name}/superpatch_{agglomerate_type}_inv_per_{invert_p}_{con_label}.csv'
+        try:
+            inversion_activations = pd.read_csv(inversion_filename)
+            
+            # Get inversion activations for relevant indices
+            concept_inv_acts = torch.tensor(
+                inversion_activations[concept].loc[relevant_indices.tolist()].values, device=device
+            )
+            
+            # Get detection mask for relevant indices
+            detected_mask = torch.tensor(
+                detected_patches.loc[relevant_indices.tolist()].values, device=device
+            )
+            
+            # Compute predictions: detected AND above invert threshold
+            predictions = detected_mask & (concept_inv_acts >= invert_threshold[0])
+            
+            # Ground truth mask
+            concept_labels = all_concept_labels[concept]
+            gt_mask = torch.tensor(concept_labels[relevant_indices] == 1, device=device)
+            
+            # Compute confusion matrix
+            tp = torch.sum(predictions & gt_mask).item()
+            fn = torch.sum((~predictions) & gt_mask).item()
+            fp = torch.sum(predictions & (~gt_mask)).item()
+            tn = torch.sum((~predictions) & (~gt_mask)).item()
+            
+            # Store results
+            tp_counts[concept] = tp
+            fn_counts[concept] = fn
+            fp_counts[concept] = fp
+            tn_counts[concept] = tn
+            
+        except FileNotFoundError:
+            print(f"Warning: Could not load inversion activations for {concept}")
+            continue
+    
+    # Compute and save metrics
+    if tp_counts:
+        suffix = '_optimal_test'
+        if all_object_patches is not None:
+            suffix = 'justobj' + suffix
+            
+        metrics_df = compute_concept_metrics(
+            fp_counts, fn_counts, tp_counts, tn_counts,
+            list(tp_counts.keys()), dataset_name, 
+            f'superpatch_{agglomerate_type}_inv_{con_label}{suffix}',
+            just_obj=(all_object_patches is not None)
+        )
+    
+    print("Completed superdetector test evaluation with optimal thresholds.")
+    
+
 def detect_then_invert_locally_performance_heatmap(metric_name, gt_samples_per_concept_test, dataset_name, con_label, 
                                            detect_percentiles, invert_percentiles, agglomerate_type='avg', just_obj=False):
     """

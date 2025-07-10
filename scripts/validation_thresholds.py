@@ -18,8 +18,9 @@ from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_perc
 from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
 
 
-MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'))]
-DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']
+MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')),  ('Qwen', ('text', 'text3'))]
+DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Sarcasm', 'iSarcasm', 'GoEmotions']
+DATASETS = ['GoEmotions']
 SAMPLE_TYPES = [('cls', 50), ('patch', 1000)]
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -127,11 +128,10 @@ if __name__ == "__main__":
     experiment_configs = product(MODELS, DATASETS, SAMPLE_TYPES)
     for (model_name, model_input_size), dataset_name, (sample_type, n_clusters) in experiment_configs:
         # Skip invalid dataset-input size combinations
-        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
+        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
             continue
-        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
+        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
             continue
-
         
         
         print(f"Processing model {model_name} dataset {dataset_name} sample type {sample_type}")

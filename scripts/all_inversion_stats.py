@@ -13,22 +13,22 @@ from utils.compute_concepts_utils import gpu_kmeans, compute_cosine_sims, comput
 from utils.unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
 compute_concept_thresholds_over_percentiles_all_pairs
 from utils.superdetector_inversion_utils import find_all_superdetector_patches, all_superdetector_inversions_across_percentiles, \
-     detect_then_invert_locally_metrics_over_percentiles
-from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles, compute_detection_metrics_over_percentiles
+     detect_then_invert_locally_metrics_over_percentiles, find_optimal_superdetector_thresholds, detect_then_invert_locally_with_optimal_thresholds
+from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, find_optimal_detect_invert_thresholds, detect_then_invert_with_optimal_thresholds, compute_concept_thresholds_over_percentiles, compute_detection_metrics_over_percentiles
 from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
 
 
 
-MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'))]
-DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']
+MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')), ('Qwen', ('text', 'text3'))]
+DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Sarcasm', 'iSarcasm', 'GoEmotions']
 SAMPLE_TYPES = [('patch', 1000)]
 
-DATASETS = ['Broden-Pascal']
+DATASETS = ['CLEVR']
 MODELS = [('Llama', (560, 560))]
 
 
 sample_type = 'patch'
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda"
 PERCENT_THRU_MODEL = 100
 SCRATCH_DIR = ''
 PERCENTILES = [0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
@@ -130,15 +130,16 @@ if __name__ == "__main__":
     experiment_configs = product(MODELS, DATASETS, SAMPLE_TYPES)
     for (model_name, model_input_size), dataset_name, (sample_type, n_clusters) in experiment_configs:
         # Skip invalid dataset-input size combinations
-        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
+        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
             continue
-        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
+        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
             continue
         
         print(f"Processing model {model_name} dataset {dataset_name} sample type {sample_type}")
         #get gt
         gt_patches_per_concept = torch.load(f'GT_Samples/{dataset_name}/gt_patches_per_concept_inputsize_{model_input_size}.pt')
         gt_patches_per_concept_test = torch.load(f'GT_Samples/{dataset_name}/gt_patch_per_concept_test_inputsize_{model_input_size}.pt')
+        gt_patches_per_concept_cal = torch.load(f'GT_Samples/{dataset_name}/gt_patch_per_concept_cal_inputsize_{model_input_size}.pt')
 
         #load embeds
         print("Loading embeddings...")
@@ -148,8 +149,6 @@ if __name__ == "__main__":
     
         all_files = get_all_files(model_name, sample_type, n_clusters)
         for con_label, _, concepts_file, acts_file in all_files:  
-            if 'kmeans' not in con_label:
-                continue
             print(con_label)
             #get act metrics
             act_metrics = get_act_metrics(dataset_name, acts_file)
@@ -157,53 +156,101 @@ if __name__ == "__main__":
             if 'kmeans' in con_label: #unsupervised concepts
                 concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
                 
-                matched_acts, matched_gt_patches_per_concept_test, \
+                matched_acts, matched_gt_patches_per_concept_cal, matched_gt_patches_per_concept_test, \
                 matched_gt_patches_per_concept, matched_concepts = get_matched_concepts_and_data(dataset_name,
                                                                                 con_label,
                                                                                 act_metrics,
+                                                                                gt_patches_per_concept_cal,
                                                                                 gt_patches_per_concept_test,
                                                                                 gt_patches_per_concept,
                                                                                 concepts=concepts
                                                                                 )
-                # Detect then invert using plain cossim stats
-                print("Computing inversion metrics")
-                detect_then_invert_metrics_over_percentiles(PERCENTILES, PERCENTILES, 
-                                                    matched_acts, matched_concepts, matched_gt_patches_per_concept, 
-                                                    matched_gt_patches_per_concept_test,
-                                                    DEVICE, dataset_name, model_input_size, con_label,
-                                                    all_object_patches=None, patch_size=14) 
+                # # Step 1: Evaluate all percentile combinations on calibration set
+                # print("Computing calibration metrics for threshold optimization...")
+                # detect_then_invert_metrics_over_percentiles(PERCENTILES, PERCENTILES, 
+                #                                     matched_acts, matched_concepts, matched_gt_patches_per_concept, 
+                #                                     matched_gt_patches_per_concept_cal,
+                #                                     DEVICE, dataset_name, model_input_size, con_label,
+                #                                     all_object_patches=None, patch_size=14)
+                
+                # # Step 2: Find optimal thresholds from calibration results
+                # print("Finding optimal detect/invert thresholds...")
+                # find_optimal_detect_invert_thresholds(PERCENTILES, PERCENTILES, dataset_name, con_label)
+                
+                # # Step 3: Evaluate on test set with optimal thresholds
+                # print("Evaluating on test set with optimal thresholds...")
+                # detect_then_invert_with_optimal_thresholds(matched_acts, matched_concepts, 
+                #                                   matched_gt_patches_per_concept, matched_gt_patches_per_concept_test,
+                #                                   DEVICE, dataset_name, model_input_size, con_label) 
 
 
                 # Detect then invert using local superpatches
                 print("Computing inversion metrics using superpatches") 
                 all_superdetector_inversions_across_percentiles(PERCENTILES, 'avg', embeds, matched_acts,
-                               matched_gt_patches_per_concept_test, dataset_name, model_input_size, con_label, 
+                               matched_gt_patches_per_concept_cal, dataset_name, model_input_size, con_label, 
                                             DEVICE, patch_size=14, local=True)
 
                 detect_then_invert_locally_metrics_over_percentiles(PERCENTILES, PERCENTILES, matched_acts, 
                                                     matched_concepts, matched_gt_patches_per_concept, 
-                                                    matched_gt_patches_per_concept_test,
+                                                    matched_gt_patches_per_concept_cal,
                                                     DEVICE, dataset_name, model_input_size, con_label,
                                                     all_object_patches=None, patch_size=14,
                                                     agglomerate_type='avg')
                 
+                # Step 4: Find optimal superdetector thresholds from calibration results
+                print("Finding optimal superdetector thresholds...")
+                find_optimal_superdetector_thresholds(PERCENTILES, PERCENTILES, dataset_name, con_label, 
+                                                     model_input_size, agglomerate_type='avg')
+                
+                # Step 5: Evaluate superdetector on test set with optimal thresholds
+                print("Evaluating superdetector on test set with optimal thresholds...")
+                detect_then_invert_locally_with_optimal_thresholds(matched_acts, matched_concepts, 
+                                                                  matched_gt_patches_per_concept, matched_gt_patches_per_concept_test,
+                                                                  DEVICE, dataset_name, model_input_size, con_label,
+                                                                  agglomerate_type='avg')
+                
                 
             else: #supervised concepts
+                continue
                 concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
+                
+                # Step 1: Evaluate all percentile combinations on calibration set
+                print("Computing calibration metrics for threshold optimization...")
                 detect_then_invert_metrics_over_percentiles(PERCENTILES, PERCENTILES, 
-                                                act_metrics, concepts, gt_patches_per_concept, gt_patches_per_concept_test,
+                                                act_metrics, concepts, gt_patches_per_concept, gt_patches_per_concept_cal,
                                                 DEVICE, dataset_name, model_input_size, con_label, 
-                                                all_object_patches=None,
-                                                patch_size=14)
+                                                all_object_patches=None, patch_size=14)
+                
+                # Step 2: Find optimal thresholds from calibration results
+                print("Finding optimal detect/invert thresholds...")
+                find_optimal_detect_invert_thresholds(PERCENTILES, PERCENTILES, dataset_name, con_label)
+                
+                # Step 3: Evaluate on test set with optimal thresholds
+                print("Evaluating on test set with optimal thresholds...")
+                detect_then_invert_with_optimal_thresholds(act_metrics, concepts, 
+                                                  gt_patches_per_concept, gt_patches_per_concept_test,
+                                                  DEVICE, dataset_name, model_input_size, con_label)
 
                 all_superdetector_inversions_across_percentiles(PERCENTILES, 'avg', embeds, act_metrics,
-                                   gt_patches_per_concept_test, dataset_name, model_input_size, con_label, 
+                                   gt_patches_per_concept_cal, dataset_name, model_input_size, con_label, 
                                                 DEVICE, patch_size=14, local=True)
                 detect_then_invert_locally_metrics_over_percentiles(PERCENTILES, PERCENTILES, act_metrics, 
-                                                        concepts, gt_patches_per_concept, gt_patches_per_concept_test,
+                                                        concepts, gt_patches_per_concept, gt_patches_per_concept_cal,
                                                         DEVICE, dataset_name, model_input_size, con_label,
                                                         all_object_patches=None, patch_size=14,
                                                         agglomerate_type='avg')
+                
+                # Step 4: Find optimal superdetector thresholds from calibration results
+                print("Finding optimal superdetector thresholds...")
+                find_optimal_superdetector_thresholds(PERCENTILES, PERCENTILES, dataset_name, con_label, 
+                                                     model_input_size, agglomerate_type='avg')
+                
+                # Step 5: Evaluate superdetector on test set with optimal thresholds
+                print("Evaluating superdetector on test set with optimal thresholds...")
+                detect_then_invert_locally_with_optimal_thresholds(act_metrics, concepts, 
+                                                                  gt_patches_per_concept, gt_patches_per_concept_test,
+                                                                  DEVICE, dataset_name, model_input_size, con_label,
+                                                                  agglomerate_type='avg')
             
             del act_metrics
             gc.collect()

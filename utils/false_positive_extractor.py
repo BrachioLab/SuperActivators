@@ -41,7 +41,7 @@ def get_false_positive_indices(dataset_name, model_name, sample_type, concept,
     # Infer model input size if not provided
     if model_input_size is None:
         # Check if it's a text dataset
-        if dataset_name in ['iSarcasm', 'Sarcasm', 'Stanford-Tree-Bank', 'IMDB', 'Jailbreak']:
+        if dataset_name in ['iSarcasm', 'Sarcasm', 'Stanford-Tree-Bank', 'IMDB', 'Jailbreak', 'GoEmotions']:
             model_input_size = ('text', 'text')
         elif model_name == 'CLIP':
             model_input_size = (224, 224)
@@ -642,7 +642,7 @@ def analyze_concept_false_positives(dataset_name='Coco', model_name='CLIP',
                         print(f"  {i+1}. Image {fp['index']}: max activation {fp['activation']:.4f} (threshold: {fp['threshold']:.4f})")
                 
                 # For text datasets, print the actual paragraphs
-                if dataset_name in ['iSarcasm', 'Sarcasm', 'Stanford-Tree-Bank', 'IMDB', 'Jailbreak']:
+                if dataset_name in ['iSarcasm', 'Sarcasm', 'Stanford-Tree-Bank', 'IMDB', 'Jailbreak', 'GoEmotions']:
                     print_false_positive_paragraphs(fp_results, dataset_name, max_examples=10)
                 
                 # Visualize if it's patch method (showing which patches triggered the detection)

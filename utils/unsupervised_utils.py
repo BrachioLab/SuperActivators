@@ -1245,7 +1245,7 @@ def find_activated_sentences_bytoken_allpairs(act_metrics, curr_thresholds, mode
     Find activated sentences for each (concept, cluster) pair over tokens.
     """
     split_df = get_split_df(dataset_name)
-    token_counts_per_sentence = torch.load(f'GT_Samples/{dataset_name}/token_counts.pt', weights_only=False)  # List[List[int]]
+    token_counts_per_sentence = torch.load(f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt', weights_only=False)  # List[List[int]]
     
     # Compute sentence start and end indices in the flat activation tensor
     token_counts_flat = torch.tensor([sum(x) for x in token_counts_per_sentence])
@@ -2327,9 +2327,10 @@ def get_matched_concepts_and_data(
     dataset_name,
     con_label,
     act_metrics,
-    gt_samples_per_concept_test,
-    gt_samples_per_concept,
-    concepts
+    gt_samples_per_concept_cal=None,
+    gt_samples_per_concept_test=None,
+    gt_samples_per_concept=None,
+    concepts=None
 ):
     """
     Loads best alignment results and filters cosine sims, concept vectors,
@@ -2354,23 +2355,99 @@ def get_matched_concepts_and_data(
 
     matching_cluster_ids = [info['best_cluster'] for info in alignment_results.values()]
     
+    matched_acts, matched_gt_cal, matched_gt_test, matched_gt, matched_concepts = None, None, None, None, None
+    
+    # Create cluster_id -> concept_name mapping
+    cluster_to_concept = {info['best_cluster']: concept_name for concept_name, info in alignment_results.items()}
+    
+    if act_metrics is not None:
+        # Select columns for matching clusters (keep cluster IDs as column names)
+        matched_acts = act_metrics[[col for col in act_metrics.columns if col in matching_cluster_ids]].copy()
+        matched_acts.to_csv(f'Unsupervised_Matches/{dataset_name}/actmetrics_{con_label}.csv')
+    
+    if gt_samples_per_concept_cal is not None:
+        # Map cluster IDs to ground truth patches
+        matched_gt_cal = {info['best_cluster']: gt_samples_per_concept_cal[concept_name]
+                          for concept_name, info in alignment_results.items()}
+        torch.save(matched_gt_cal, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_cal_{con_label}.pt')
+    
+    if gt_samples_per_concept_test is not None:
+        # Map cluster IDs to ground truth patches
+        matched_gt_test = {info['best_cluster']: gt_samples_per_concept_test[concept_name]
+                           for concept_name, info in alignment_results.items()}
+        torch.save(matched_gt_test, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_test_{con_label}.pt')
+        
+    if gt_samples_per_concept is not None:
+        # Map cluster IDs to ground truth patches
+        matched_gt = {info['best_cluster']: gt_samples_per_concept[concept_name]
+                      for concept_name, info in alignment_results.items()}
+        torch.save(matched_gt, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_{con_label}.pt')
+        
+    if concepts is not None:
+        # Map cluster IDs to concept vectors
+        matched_concepts = {info['best_cluster']: concepts[info['best_cluster']] 
+                           for concept_name, info in alignment_results.items() 
+                           if info['best_cluster'] in concepts}
+        torch.save(matched_concepts, f'Unsupervised_Matches/{dataset_name}/concepts_{con_label}.pt') 
+
+    return matched_acts, matched_gt_cal, matched_gt_test, matched_gt, matched_concepts
+
+
+def get_matched_concepts_and_data_chunked(
+    dataset_name,
+    con_label,
+    act_metrics,
+    gt_samples_per_concept_test,
+    gt_samples_per_concept,
+    concepts
+):
+    """
+    Chunked version that saves results to Chunked_Unsupervised_Matches folder.
+    
+    Loads best alignment results and filters cosine sims, concept vectors,
+    and ground truth patch mappings for matched clusters.
+
+    Args:
+        dataset_name (str): Name of the dataset (e.g., 'CLEVR').
+        con_label (str): Concept label (e.g., 'CLIP_kmeans_1000_patch...').
+        cos_sims (pd.DataFrame): Cosine similarity matrix (patches × clusters).
+        gt_patches_per_concept_test (dict): Concept → list of test patch indices.
+        gt_patches_per_concept (dict): Concept → list of train patch indices.
+        concepts (dict): Cluster ID → concept embedding.
+
+    Returns:
+        matched_acts (pd.DataFrame): Cosine sims for matched clusters.
+        matched_gt_test (dict): Cluster ID → list of test patches.
+        matched_gt_train (dict): Cluster ID → list of train patches.
+        matched_concepts (dict): Cluster ID → concept vector.
+    """
+    import os
+    
+    alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
+    alignment_results = torch.load(alignment_path)
+
+    matching_cluster_ids = [info['best_cluster'] for info in alignment_results.values()]
+    
+    # Create Chunked_Unsupervised_Matches directory
+    os.makedirs(f'Chunked_Unsupervised_Matches/{dataset_name}', exist_ok=True)
+    
     matched_acts, matched_gt_test, matched_gt, matched_concepts = None, None, None, None
     if act_metrics is not None:
         matched_acts = act_metrics[[col for col in act_metrics.columns if col in matching_cluster_ids]]
-        matched_acts.to_csv(f'Unsupervised_Matches/{dataset_name}/actmetrics_{con_label}.csv')
+        matched_acts.to_csv(f'Chunked_Unsupervised_Matches/{dataset_name}/actmetrics_{con_label}.csv')
     
     if gt_samples_per_concept_test is not None:
         matched_gt_test = {info['best_cluster']: gt_samples_per_concept_test[c]
                            for c, info in alignment_results.items()}
-        torch.save(matched_gt_test, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_test_{con_label}.pt')
+        torch.save(matched_gt_test, f'Chunked_Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_test_{con_label}.pt')
         
     if gt_samples_per_concept is not None:
         matched_gt = {info['best_cluster']: gt_samples_per_concept[c]
                             for c, info in alignment_results.items()}
-        torch.save(matched_gt, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_{con_label}.pt')
+        torch.save(matched_gt, f'Chunked_Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_{con_label}.pt')
         
     if concepts is not None:
         matched_concepts = {cid: concepts[cid] for cid in matching_cluster_ids if cid in concepts}
-        torch.save(matched_concepts, f'Unsupervised_Matches/{dataset_name}/concepts_{con_label}.pt') 
+        torch.save(matched_concepts, f'Chunked_Unsupervised_Matches/{dataset_name}/concepts_{con_label}.pt') 
 
     return matched_acts, matched_gt_test, matched_gt, matched_concepts

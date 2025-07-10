@@ -11,6 +11,7 @@ from vllm import LLM
 
 import sys
 sys.path.append('/shared_data0/cgoldberg/Concept_Inversion/Experiments')
+sys.path.append('/workspace/Experiments')
 # from src.datasets import ImageDataset  # Not used - using FixedImageDataset instead
 from src.inversion_methods import prompt_inversion
 from src.prompt_concepts import LLMNet, RawInput
@@ -26,7 +27,7 @@ class FixedImageDataset:
         self.split = split
 
         # Load metadata to get concept information
-        self.metadata = pd.read_csv(f"{root}/Data/{dataset_name}/metadata.csv")
+        self.metadata = pd.read_csv(f"/workspace/Data/{dataset_name}/metadata.csv")
 
         # Select images based on the split
         if split == "train":
@@ -47,9 +48,11 @@ class FixedImageDataset:
             target_concepts = ['sarcasm']
         elif dataset_name == 'iSarcasm':
             target_concepts = ['sarcasm', 'irony', 'satire', 'understatement', 'overstatement', 'rhetorical_question', 'sarcastic']
+        elif dataset_name == 'GoEmotions':
+            target_concepts = ['admiration', 'amusement', 'anger', 'annoyance', 'approval', 'caring', 'confusion', 'curiosity', 'disappointment', 'disapproval', 'disgust', 'excitement', 'gratitude', 'joy', 'love', 'optimism', 'realization', 'sadness', 'surprise']
         else:
             # Fallback to all concepts if dataset not recognized
-            target_concepts = [col for col in self.metadata.columns if col not in ["image_path", "split", "class"]]
+            target_concepts = [col for col in self.metadata.columns if col not in ["image_path", "split", "class", "text_path"]]
         
         # Filter to only target concepts that exist in metadata
         self.concept_columns = [col for col in target_concepts if col in self.metadata.columns]
@@ -65,14 +68,14 @@ class FixedImageDataset:
         # Check if this is a text dataset
         if 'text_path' in self.metadata.columns:
             # Load text
-            text_path = f"{self.root}/Data/{self.dataset_name}/{self.metadata.iloc[idx]['text_path']}"
+            text_path = f"/workspace/Data/{self.dataset_name}/{self.metadata.iloc[idx]['text_path']}"
             with open(text_path, 'r', encoding='utf-8') as f:
                 text = f.read().strip()
             data = text
         else:
             # Load image
             from PIL import Image
-            image_path = f"{self.root}/Data/{self.dataset_name}/{self.metadata.iloc[idx]['image_path']}"
+            image_path = f"/workspace/Data/{self.dataset_name}/{self.metadata.iloc[idx]['image_path']}"
             image = Image.open(image_path).convert("RGB")
             
             # Apply transforms if available
@@ -103,12 +106,12 @@ def concept_inversion(args):
         max_num_seqs=1,
         enforce_eager=True if "llama" in args.model.lower() else False,
         trust_remote_code=True,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.9,
     )
 
     # load dataset
     data = FixedImageDataset(
-        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+        root="/workspace", dataset_name=args.dataset, split="test"
     )
     concept_names = data.get_concept_names()
 
@@ -166,12 +169,12 @@ def main(args):
         max_num_seqs=1,
         enforce_eager=True if "llama" in args.model.lower() else False,
         trust_remote_code=True,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.9,
     )
 
     # load dataset
     data = FixedImageDataset(
-        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+        root="/workspace", dataset_name=args.dataset, split="test"
     )
     concept_names = data.get_concept_names()
 
@@ -264,7 +267,7 @@ def eval(args):
     
     # load dataset
     data = FixedImageDataset(
-        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+        root="/workspace", dataset_name=args.dataset, split="test"
     )
     concept_names = data.get_concept_names()
 
@@ -405,7 +408,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/shared_data0/cgoldberg/Concept_Inversion/",
+        default="/workspace/Experiments",
         help="The output directory for extracted concepts.",
     )
     parser.add_argument("--eval", action="store_true", help="Whether to evaluate the concepts.")

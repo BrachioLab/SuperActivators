@@ -10,9 +10,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.quant_concept_evals_utils import evaluate_baseline_models_across_dataset, compute_concept_metrics, inversion_baselines
 
-MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'))]
+MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')), ('Qwen', ('text', 'text3'))]
+
 DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Sarcasm', 'iSarcasm']
-DATASETS = ['Sarcasm', 'iSarcasm']
+DATASETS = ['GoEmotions']
 SAMPLE_TYPES = ['cls', 'patch']
 
 N_TRIALS = 2
@@ -22,9 +23,9 @@ if __name__ == "__main__":
     experiment_configs = product(MODELS, DATASETS, SAMPLE_TYPES)
     for (model_name, model_input_size), dataset_name, sample_type in experiment_configs:
         # Skip invalid dataset-input size combinations
-        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
+        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
             continue
-        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm']:
+        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
             continue
             
         print(f"Running model {model_name} dataset {dataset_name} sample type {sample_type}")

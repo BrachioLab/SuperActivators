@@ -12,6 +12,7 @@ import base64
 import numpy as np
 from utils.general_utils import get_split_df
 from itertools import chain
+from collections import defaultdict
 
 #### Computations ####
 # def flatten_token_list(tokens_list):
@@ -50,18 +51,30 @@ def get_glob_tok_indices_from_sent_idx(sentence_idx, tokens_list):
     return start_idx, end_idx
 
 
-def get_sent_idx_from_global_token_idx(token_idx, dataset_name):
+def get_sent_idx_from_global_token_idx(token_idx, dataset_name, model_input_size=None):
     """
     Given a global token index (from a flattened token list), return the corresponding sentence index.
 
     Args:
-        global_idx (int): Index of a token in the flattened token list.
-        tokens_list (List[List[str]]): List of tokenized sentences.
+        token_idx (int): Index of a token in the flattened token list.
+        dataset_name (str): Name of the dataset.
+        model_input_size (tuple, optional): Model input size for model-specific files.
 
     Returns:
         int: Sentence index containing the token.
     """
-    tokens_list = torch.load(f'GT_Samples/{dataset_name}/tokens.pt', weights_only=False)
+    # Try model-specific tokens file first, fall back to generic
+    if model_input_size is not None:
+        model_specific_path = f'GT_Samples/{dataset_name}/tokens_inputsize_{model_input_size}.pt'
+        generic_path = f'GT_Samples/{dataset_name}/tokens.pt'
+        
+        import os
+        if os.path.exists(model_specific_path):
+            tokens_list = torch.load(model_specific_path, weights_only=False)
+        else:
+            tokens_list = torch.load(generic_path, weights_only=False)
+    else:
+        tokens_list = torch.load(f'GT_Samples/{dataset_name}/tokens.pt', weights_only=False)
     
     token_counter = 0
     for sent_idx, tokens in enumerate(tokens_list):
@@ -158,6 +171,9 @@ def get_sentence_category(sentence_idx, dataset_name):
     if dataset_name == 'Stanford-Tree-Bank':
         metadata = pd.read_csv(f'../Data/{dataset_name}/sentence_level_sentiment.csv')
         return str(metadata['sentiment_label'].loc[sentence_idx])
+    elif 'Emotions' in dataset_name:
+        metadata = pd.read_csv(f'../Data/{dataset_name}/paragraph_level_emotion.csv')
+        return ""
     else:
         metadata = pd.read_csv(f'../Data/{dataset_name}/paragraph_level_sarcasm.csv')
         return str(metadata['sarcasm'].loc[sentence_idx])
@@ -516,6 +532,178 @@ def plot_all_concept_activations_on_sentence(
     <div>
         {''.join(html_blocks)}
         <div style="margin-top: 15px;">{colorbar_html}</div>
+    </div>
+    """
+    display(HTML(full_html))
+
+
+def plot_tokens_by_activation_and_gt(
+    cos_sims,
+    tokens_list,
+    dataset_name,
+    model_input_size,
+    concept=None,
+    n_examples=3,
+    cmap_name="coolwarm"
+):
+    """
+    Plots tokens in context showing paragraphs with the most positive, negative, and near-zero 
+    maximum token activations, split by ground truth labels. Only includes paragraphs from the test split.
+    
+    Args:
+        cos_sims (pd.DataFrame): DataFrame with rows as flattened tokens, cols as concept names.
+        tokens_list (List[List[str]]): List of tokenized sentences.
+        dataset_name (str): Name of dataset.
+        model_input_size (tuple): Model input size for loading GT samples.
+        concept (str): Concept to visualize.
+        n_examples (int): Number of examples per category (default: 3).
+        cmap_name (str): Colormap name for visualization.
+    """
+    # Import needed functions
+    from collections import defaultdict
+    import os
+    
+    # Select concept if not provided
+    if concept is None:
+        concept = user_select_concept(cos_sims.columns)
+    
+    # Load ground truth token indices (patches for text datasets)
+    gt_path = f'GT_Samples/{dataset_name}/gt_patches_per_concept_inputsize_{model_input_size}.pt'
+    if not os.path.exists(gt_path):
+        # Try alternative path for text datasets
+        gt_path = f'GT_Samples/{dataset_name}/gt_patches_per_concept_inputsize_text.pt'
+    
+    if os.path.exists(gt_path):
+        gt_patches_per_concept = torch.load(gt_path, weights_only=False)
+        gt_indices = set(gt_patches_per_concept.get(concept, []))
+    else:
+        print(f"Warning: Could not find GT samples file at {gt_path}")
+        gt_indices = set()
+    
+    # Get test split indices
+    split_df = get_split_df(dataset_name)
+    test_sentence_indices = split_df[split_df == 'test'].index.tolist()
+    
+    # Compute max activation per paragraph and track which paragraphs have GT tokens
+    paragraph_data = []
+    idx = 0
+    for sent_idx, tokens in enumerate(tokens_list):
+        if sent_idx in test_sentence_indices:
+            start_idx = idx
+            end_idx = idx + len(tokens)
+            
+            # Get activations for all tokens in this paragraph
+            paragraph_sims = cos_sims[concept].iloc[start_idx:end_idx]
+            max_activation = paragraph_sims.max()
+            
+            # Check if any token in this paragraph is GT
+            paragraph_token_indices = list(range(start_idx, end_idx))
+            has_gt = any(token_idx in gt_indices for token_idx in paragraph_token_indices)
+            
+            paragraph_data.append({
+                'sent_idx': sent_idx,
+                'max_activation': max_activation,
+                'has_gt': has_gt
+            })
+        idx += len(tokens)
+    
+    # Split by ground truth
+    gt_true_paragraphs = [p for p in paragraph_data if p['has_gt']]
+    gt_false_paragraphs = [p for p in paragraph_data if not p['has_gt']]
+    
+    # Sort by max activation
+    gt_true_sorted = sorted(gt_true_paragraphs, key=lambda x: x['max_activation'], reverse=True)
+    gt_false_sorted = sorted(gt_false_paragraphs, key=lambda x: x['max_activation'], reverse=True)
+    
+    # Get examples for each category
+    categories = {}
+    
+    # GT True categories
+    if len(gt_true_sorted) >= n_examples:
+        categories["GT True - Most Positive"] = gt_true_sorted[:n_examples]
+        categories["GT True - Most Negative"] = gt_true_sorted[-n_examples:]
+        # For near zero, sort by absolute value of max activation
+        gt_true_by_abs = sorted(gt_true_paragraphs, key=lambda x: abs(x['max_activation']))
+        categories["GT True - Near Zero"] = gt_true_by_abs[:n_examples]
+    else:
+        categories["GT True - Most Positive"] = gt_true_sorted
+        categories["GT True - Most Negative"] = []
+        categories["GT True - Near Zero"] = []
+    
+    # GT False categories
+    if len(gt_false_sorted) >= n_examples:
+        categories["GT False - Most Positive"] = gt_false_sorted[:n_examples]
+        categories["GT False - Most Negative"] = gt_false_sorted[-n_examples:]
+        # For near zero, sort by absolute value of max activation
+        gt_false_by_abs = sorted(gt_false_paragraphs, key=lambda x: abs(x['max_activation']))
+        categories["GT False - Near Zero"] = gt_false_by_abs[:n_examples]
+    else:
+        categories["GT False - Most Positive"] = gt_false_sorted
+        categories["GT False - Most Negative"] = []
+        categories["GT False - Near Zero"] = []
+    
+    # Collect all scores for consistent colormap scale
+    all_scores = []
+    for category_paragraphs in categories.values():
+        for paragraph in category_paragraphs:
+            sent_idx = paragraph['sent_idx']
+            start_idx, end_idx = get_glob_tok_indices_from_sent_idx(sent_idx, tokens_list)
+            all_scores.extend(cos_sims[concept].iloc[start_idx:end_idx].tolist())
+    
+    if all_scores:
+        vmin, vmax = min(all_scores), max(all_scores)
+    else:
+        vmin, vmax = -1, 1  # Default range if no scores
+    
+    # Create visualization
+    html_blocks = []
+    
+    for category_name, paragraphs in categories.items():
+        if paragraphs:  # Only show categories with examples
+            html_blocks.append(f"<h3>{category_name}</h3>")
+            
+            for i, paragraph in enumerate(paragraphs):
+                sent_idx = paragraph['sent_idx']
+                max_activation = paragraph['max_activation']
+                start_idx, end_idx = get_glob_tok_indices_from_sent_idx(sent_idx, tokens_list)
+                
+                tokens = tokens_list[sent_idx]
+                sims = cos_sims[concept].iloc[start_idx:end_idx].tolist()
+                
+                # Find which token has the max activation
+                max_token_idx = np.argmax(sims)
+                max_token = remove_leading_token([tokens[max_token_idx]])[0]
+                
+                # Get sentence category
+                category = get_sentence_category(sent_idx, dataset_name)
+                
+                # Create title with paragraph info
+                title = f"<h4>Example {i+1}: Paragraph {sent_idx} - {category} (max token: '{max_token}' = {max_activation:.3f})</h4>"
+                
+                # Create highlighted sentence
+                html = highlight_tokens_with_legend(tokens, sims, cmap_name=cmap_name, vmin=vmin, vmax=vmax, include_colorbar=False)
+                
+                # Add marker for the max token
+                html_with_marker = html.data.replace(
+                    f'>{max_token}</span>',
+                    f' style="border: 3px solid black; font-weight: bold;">{max_token}</span>'
+                )
+                
+                html_blocks.append(f"{title}{html_with_marker}")
+    
+    # Add shared colorbar
+    colorbar_html = plot_colorbar(vmin=vmin, vmax=vmax, cmap_name=cmap_name, orientation="horizontal")
+    
+    # Print summary statistics
+    print(f"\nConcept: {concept}")
+    print(f"GT True paragraphs in test set: {len(gt_true_paragraphs)}")
+    print(f"GT False paragraphs in test set: {len(gt_false_paragraphs)}")
+    print(f"Activation range: [{vmin:.3f}, {vmax:.3f}]")
+    
+    full_html = f"""
+    <div>
+        {''.join(html_blocks)}
+        <div style="margin-top: 20px;">{colorbar_html}</div>
     </div>
     """
     display(HTML(full_html))

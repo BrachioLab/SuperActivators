@@ -49,7 +49,7 @@ def get_patch_range_for_image(image_index, patch_size=14, model_input_size=(224,
 
     return start_patch_index, end_patch_index
 
-def get_patch_range_for_text(sentence_index, dataset_name):
+def get_patch_range_for_text(sentence_index, dataset_name, model_input_size=None):
     """
     Computes the start and end token indices for a given sentence index
     based on a saved `token_counts.pt` file.
@@ -57,14 +57,22 @@ def get_patch_range_for_text(sentence_index, dataset_name):
     Args:
         sentence_index (int): The index of the sentence.
         dataset_name (str): Name of the dataset (used to locate saved file).
-        token_counts_path (str, optional): Path to token_counts.pt file. If not provided,
-                                           defaults to 'GT_Samples/{dataset_name}/token_counts.pt'.
+        model_input_size (tuple, optional): Model input size for model-specific files.
 
     Returns:
         tuple: (start_token_index, end_token_index)
     """
-    # Construct path if not provided
-    token_counts_path = f'GT_Samples/{dataset_name}/token_counts.pt'
+    # Construct path - try model-specific first, fall back to generic
+    if model_input_size is not None:
+        model_specific_path = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
+        generic_path = f'GT_Samples/{dataset_name}/token_counts.pt'
+        
+        if os.path.exists(model_specific_path):
+            token_counts_path = model_specific_path
+        else:
+            token_counts_path = generic_path
+    else:
+        token_counts_path = f'GT_Samples/{dataset_name}/token_counts.pt'
 
     # Load token counts
     token_counts_per_sentence = torch.load(token_counts_path, weights_only=False)
@@ -164,9 +172,19 @@ def get_patch_split_df(dataset_name, model_input_size, patch_size=14):
         # Repeat each row num_patches times and reset index
         patch_metadata_df = split_df.loc[split_df.index.repeat(num_patches)].reset_index(drop=True)
     else:
-        token_lists = torch.load(f'GT_Samples/{dataset_name}/tokens.pt', weights_only=False)  # List[List[str]]
+        # For text datasets, try to load model-specific token files first
+        model_specific_tokens_file = f'GT_Samples/{dataset_name}/tokens_inputsize_{model_input_size}.pt'
+        generic_tokens_file = f'GT_Samples/{dataset_name}/tokens.pt'
+        
+        import os
+        if os.path.exists(model_specific_tokens_file):
+            print(f"   📄 Loading model-specific tokens: {model_specific_tokens_file}")
+            token_lists = torch.load(model_specific_tokens_file, weights_only=False)
+        else:
+            print(f"   ⚠️  Model-specific tokens not found, using generic: {generic_tokens_file}")
+            token_lists = torch.load(generic_tokens_file, weights_only=False)
+        
         num_tokens_per_sample = [len(tokens) for tokens in token_lists]
-
         split_df = per_sample_metadata_df['split']
         patch_metadata_df = split_df.loc[split_df.index.repeat(num_tokens_per_sample)].reset_index(drop=True)
         

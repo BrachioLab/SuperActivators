@@ -13,6 +13,8 @@ from transformers import AutoTokenizer
 from torch.nn.utils.rnn import pad_sequence
 import gc
 import sys
+import json
+from pathlib import Path
 
 sys.path.append(os.path.abspath(".."))
 
@@ -156,7 +158,10 @@ def get_clip_patch_embeddings(model, processor, images, device, percent_thru_mod
 
 def get_llama_cls_embeddings(model, processor, images, device, percent_thru_model=100):
     """
-    Extracts llama cls embeddings for each image.
+    Extracts llama cls embeddings for each image WITHOUT using the projector.
+    
+    NOTE: This returns embeddings from the last layer of the vision model (1280-dim)
+    instead of projecting them to the language model space (4096-dim).
 
     Args:
         model: The LLAMA model to generate embeddings.
@@ -181,10 +186,8 @@ def get_llama_cls_embeddings(model, processor, images, device, percent_thru_mode
             output_attentions=False,
             return_dict=True
         )
+        # Use the raw vision outputs WITHOUT projecting them
         cross_attention_states = vision_outputs[0]
-        cross_attention_states = model.model.multi_modal_projector(cross_attention_states).reshape(
-            -1, cross_attention_states.shape[-2], model.model.hidden_size
-        )
     
     # Initialize storage for embeddings (excluding the class token)
     all_embs = []
@@ -201,7 +204,10 @@ def get_llama_cls_embeddings(model, processor, images, device, percent_thru_mode
 
 def get_llama_patch_embeddings(model, processor, images, device, percent_thru_model=100):
     """
-    Extracts llama patch embeddings for each image.
+    Extracts llama patch embeddings for each image WITHOUT using the projector.
+    
+    NOTE: This returns embeddings from the last layer of the vision model (1280-dim)
+    instead of projecting them to the language model space (4096-dim).
 
     Args:
         model: The LLAMA model to generate embeddings.
@@ -226,10 +232,8 @@ def get_llama_patch_embeddings(model, processor, images, device, percent_thru_mo
             output_attentions=False,
             return_dict=True
         )
+        # Use the raw vision outputs WITHOUT projecting them
         cross_attention_states = vision_outputs[0] #get last hidden state
-        cross_attention_states = model.model.multi_modal_projector(cross_attention_states).reshape(
-            -1, cross_attention_states.shape[-2], model.model.hidden_size
-        )
     
     # Initialize storage for embeddings (excluding the class token)
     all_embs = []
@@ -245,23 +249,100 @@ def get_llama_patch_embeddings(model, processor, images, device, percent_thru_mo
     return patch_embeddings
 
 
-def get_llama_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
+# def get_llama_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
+#     """
+#     Extracts embeddings from chosen layer of given model for each patch in each image.
+
+#     Args:
+#         model: The LLAMA model to generate embeddings.
+#         processor: The processor used for transforming the images and text.
+#         text_samples: A list of text strings.
+#         device: The device to move the tensors to.
+#         percent_thru_model (int) : Not used, for now
+#     Returns:
+#         torch.Tensor: The generated embeddings per patch per image.
+#     """
+#     hidden_states_list = []
+#     with torch.no_grad():
+#         for text_sample in text_samples: #do one by one so special tokens consistent w different batch sizes
+#             inputs = processor.tokenizer(
+#                 text_sample,
+#                 add_special_tokens=False,
+#                 padding=False,
+#                 return_tensors="pt"
+#             ).to(model.device)
+
+#             outputs = model(
+#                 **inputs,
+#                 output_hidden_states=True,
+#                 return_dict=True
+#             )
+
+#             hidden_states = outputs.hidden_states
+#             hidden = hidden_states[-1].squeeze() #just get hidden state from last layer  
+#             hidden_states_list.append(hidden)
+
+#     hidden_states = torch.cat(hidden_states_list, dim=0)
+#     return hidden_states
+
+
+# def get_llama_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
+#     """
+#     Extracts mean pooled token embeddings from the LLaMA model for each text sample.
+
+#     Args:
+#         model: The LLaMA model (e.g., LlamaForCausalLM).
+#         processor: The processor used for tokenization.
+#         text_samples: A list of text strings.
+#         device: Device for model execution.
+#         percent_thru_model: Not used.
+
+#     Returns:
+#         torch.Tensor: Mean pooled embeddings per text sample.
+#     """
+#     mean_embeddings = []
+#     with torch.no_grad():
+#         for text_sample in text_samples:
+#             inputs = processor(
+#                 text=text_sample,
+#                 add_special_tokens=False,
+#                 padding=False,
+#                 return_tensors="pt"
+#             ).to(device)
+
+#             outputs = model(
+#                 **inputs,
+#                 output_hidden_states=True,
+#                 return_dict=True
+#             )
+
+#             last_hidden = outputs.hidden_states[-1]  # (1, seq_len, hidden_dim)
+#             mean_emb = last_hidden.mean(dim=1)       # (1, hidden_dim)
+#             mean_embeddings.append(mean_emb)
+
+#     return torch.cat(mean_embeddings, dim=0)  # (n_samples, hidden_dim)
+
+
+def get_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
     """
-    Extracts embeddings from chosen layer of given model for each patch in each image.
+    Extracts embeddings from chosen layer of given model for each token in each text sample.
 
     Args:
-        model: The LLAMA model to generate embeddings.
-        processor: The processor used for transforming the images and text.
+        model: The language model to generate embeddings (e.g., Llama, Mistral).
+        processor: The processor used for tokenization.
         text_samples: A list of text strings.
         device: The device to move the tensors to.
         percent_thru_model (int) : Not used, for now
     Returns:
-        torch.Tensor: The generated embeddings per patch per image.
+        torch.Tensor: The generated embeddings per token per text sample.
     """
     hidden_states_list = []
+    # Determine if processor has a tokenizer attribute (Llama) or is itself a tokenizer (Mistral)
+    tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+    
     with torch.no_grad():
         for text_sample in text_samples: #do one by one so special tokens consistent w different batch sizes
-            inputs = processor.tokenizer(
+            inputs = tokenizer(
                 text_sample,
                 add_special_tokens=False,
                 padding=False,
@@ -282,25 +363,28 @@ def get_llama_text_patch_embeddings(model, processor, text_samples, device, perc
     return hidden_states
 
 
-def get_llama_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
+def get_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
     """
-    Extracts CLS-style embeddings (first token) from LLaMA model for each text sample.
+    Extracts mean pooled token embeddings from the language model for each text sample.
 
     Args:
-        model: The LLaMA model (e.g., LlamaForCausalLM).
+        model: The language model (e.g., LlamaForCausalLM, MistralForCausalLM).
         processor: The processor used for tokenization.
         text_samples: A list of text strings.
         device: Device for model execution.
-    
+        percent_thru_model: Not used.
+
     Returns:
-        torch.Tensor: CLS-style embeddings per text sample.
+        torch.Tensor: Mean pooled embeddings per text sample.
     """
-    cls_embeddings = []
+    mean_embeddings = []
+    # Determine if processor has a tokenizer attribute (Llama) or is itself a tokenizer (Mistral)
+    tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+    
     with torch.no_grad():
         for text_sample in text_samples:
-            # Tokenize with special tokens
-            inputs = processor(
-                text=text_sample,
+            inputs = tokenizer(
+                text_sample,
                 add_special_tokens=False,
                 padding=False,
                 return_tensors="pt"
@@ -313,10 +397,11 @@ def get_llama_text_cls_embeddings(model, processor, text_samples, device, percen
             )
 
             last_hidden = outputs.hidden_states[-1]  # (1, seq_len, hidden_dim)
-            cls_emb = last_hidden[:, -1, :]  # Take the last token as pseudo-CLS
-            cls_embeddings.append(cls_emb)
+            mean_emb = last_hidden.mean(dim=1)       # (1, hidden_dim)
+            mean_embeddings.append(mean_emb)
 
-    return torch.cat(cls_embeddings, dim=0)
+    return torch.cat(mean_embeddings, dim=0)  # (n_samples, hidden_dim)
+
 
 
 # def get_clip_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
@@ -588,7 +673,8 @@ def center_and_normalize_embeddings(embeddings, dataset_name, model_input_size, 
 
 def compute_batch_embeddings(images, embedding_fxn, model, processor, device, 
                              percent_thru_model, dataset_name, model_input_size,
-                             embeddings_file=None, batch_size=100, scratch_dir=""):
+                             embeddings_file=None, batch_size=100, scratch_dir="",
+                             chunk_if_larger_gb=10):
     """
     Compute, center, and normalize embeddings for images.
 
@@ -602,6 +688,7 @@ def compute_batch_embeddings(images, embedding_fxn, model, processor, device,
         dataset_name (str): Dataset name.
         embeddings_file (str): Path to save embeddings.
         batch_size (int): Number of images per batch.
+        chunk_if_larger_gb (float): If file size exceeds this, save as chunks. Set to None to disable chunking.
 
     Returns:
         tuple: (normalized_train_embeddings, normalized_test_embeddings)
@@ -640,9 +727,81 @@ def compute_batch_embeddings(images, embedding_fxn, model, processor, device,
     
     if embeddings_file:
         output_file = f'Embeddings/{dataset_name}/{embeddings_file}'
-        # Save as a dictionary
+        
+        # Always save as chunks
+        if chunk_if_larger_gb is not None:
+            bytes_per_gb = 1024 * 1024 * 1024
+            embedding_size_gb = (norm_embeddings.numel() * norm_embeddings.element_size()) / bytes_per_gb
+            
+            # Calculate number of chunks needed
+            if embedding_size_gb > chunk_if_larger_gb:
+                num_chunks = int(np.ceil(embedding_size_gb / chunk_if_larger_gb))
+                print(f"Embedding size {embedding_size_gb:.2f}GB exceeds {chunk_if_larger_gb}GB threshold")
+            else:
+                num_chunks = 1
+                print(f"Embedding size {embedding_size_gb:.2f}GB - saving as 1 chunk")
+                
+            chunk_size_samples = len(norm_embeddings) // num_chunks
+            print(f"Saving as {num_chunks} chunk(s)")
+            
+            # Save chunk info
+            chunk_info = {
+                'num_chunks': num_chunks,
+                'chunk_size': chunk_size_samples,
+                'total_samples': len(norm_embeddings),
+                'embedding_dim': norm_embeddings.shape[1],
+                'chunks': []
+            }
+            
+            # Save each chunk
+            for i in range(num_chunks):
+                start_idx = i * chunk_size_samples
+                end_idx = (i + 1) * chunk_size_samples if i < num_chunks - 1 else len(norm_embeddings)
+                
+                chunk_embeddings = norm_embeddings[start_idx:end_idx]
+                chunk_file = output_file.replace('.pt', f'_chunk_{i}.pt')
+                
+                # Save chunk with metadata
+                chunk_data = {
+                    'normalized_embeddings': chunk_embeddings,
+                    'mean_train_embedding': mean_train_embedding,
+                    'train_norm': train_norm
+                }
+                
+                torch.save(chunk_data, chunk_file)
+                print(f"  Saved chunk {i}: indices {start_idx}-{end_idx} to {chunk_file}")
+                
+                chunk_info['chunks'].append({
+                    'file': os.path.basename(chunk_file),
+                    'start_idx': start_idx,
+                    'end_idx': end_idx,
+                    'shape': list(chunk_embeddings.shape)
+                })
+                
+                # Clear memory
+                del chunk_embeddings
+                gc.collect()
+            
+            # Save chunk info
+            info_file = output_file.replace('.pt', '_chunks_info.json')
+            with open(info_file, 'w') as f:
+                json.dump(chunk_info, f, indent=2)
+            
+            print(f"Chunk info saved to {info_file}")
+            
+            # Update embedding stats with chunk info
+            embeds_dic['is_chunked'] = True
+            embeds_dic['chunk_info'] = chunk_info
+            update_embedding_stats_json(dataset_name, embeddings_file, embeds_dic, model_input_size)
+            
+            return embeds_dic
+        
+        # Save as single file (only if chunk_if_larger_gb is None)
         torch.save(embeds_dic, output_file)
         print(f"Embeddings saved to {output_file} :)")
+        
+        # Update the embedding stats JSON
+        update_embedding_stats_json(dataset_name, embeddings_file, embeds_dic, model_input_size)
 
     return embeds_dic
 
@@ -2077,7 +2236,7 @@ def write_batch_cosine_sims(writer, embeddings, i, batch_size, device,
     del batch_embeddings, cosine_similarities, batch_sims
         
 
-def compute_cosine_sims(embeddings, concepts, output_file, dataset_name, device, scratch_dir='', batch_size=32):
+def compute_cosine_sims(embeddings, concepts, output_file, dataset_name, device, scratch_dir='', batch_size=32, chunk_if_larger_gb=10):
     if dataset_name == 'Coco' and 'kmeans' not in output_file:
         concept_keys = filter_coco_concepts(list(concepts.keys()))
     else:
@@ -2088,8 +2247,51 @@ def compute_cosine_sims(embeddings, concepts, output_file, dataset_name, device,
 
     base_path = f'{scratch_dir}Cosine_Similarities/{dataset_name}/'
     os.makedirs(base_path, exist_ok=True)
+    
+    # Always save as chunks
+    if chunk_if_larger_gb is not None:
+        bytes_per_value = 8  # Average bytes per CSV value
+        bytes_per_gb = 1024 * 1024 * 1024
+        total_values = embeddings.shape[0] * len(concept_keys)
+        estimated_size_gb = (total_values * bytes_per_value) / bytes_per_gb
+        
+        # Calculate number of chunks needed
+        if estimated_size_gb > chunk_if_larger_gb:
+            num_chunks = int(np.ceil(estimated_size_gb / chunk_if_larger_gb))
+            print(f"Estimated CSV size {estimated_size_gb:.2f}GB exceeds {chunk_if_larger_gb}GB threshold")
+        else:
+            num_chunks = 1
+            print(f"Estimated CSV size {estimated_size_gb:.2f}GB - saving as 1 chunk")
+            
+        rows_per_chunk = embeddings.shape[0] // num_chunks
+        print(f"Saving as {num_chunks} chunk(s)")
+        
+        for chunk_idx in range(num_chunks):
+            start_row = chunk_idx * rows_per_chunk
+            end_row = (chunk_idx + 1) * rows_per_chunk if chunk_idx < num_chunks - 1 else embeddings.shape[0]
+            
+            chunk_output_file = output_file.replace('.csv', f'_chunk_{chunk_idx}.csv')
+            chunk_output_path = os.path.join(base_path, chunk_output_file)
+            
+            print(f"Processing chunk {chunk_idx}: rows {start_row}-{end_row}")
+            
+            with open(chunk_output_path, mode='w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=concept_keys)
+                writer.writeheader()
+                
+                with torch.no_grad():
+                    for i in tqdm(range(start_row, end_row, batch_size), 
+                                desc=f"Computing cosine similarities (chunk {chunk_idx})"):
+                        write_batch_cosine_sims(writer, embeddings, i, batch_size, device, 
+                                               all_concept_embeddings_tensor, concept_keys)
+            
+            print(f"Chunk {chunk_idx} saved to {chunk_output_path}")
+        
+        print(f"All {num_chunks} chunk(s) saved successfully")
+        return
+    
+    # Save as single file (only if chunk_if_larger_gb is None)
     output_path = os.path.join(base_path, output_file)
-
     with open(output_path, mode='w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=concept_keys)
         writer.writeheader()
@@ -2136,46 +2338,80 @@ def write_dist_row(writer, embeds, i, batch_size, device, weight_matrix, concept
     del batch
     torch.cuda.empty_cache()
         
-def compute_signed_distances(embeds, concepts, dataset_name, device, output_file, scratch_dir, batch_size=100):
+def compute_signed_distances(embeds, concepts, dataset_name, device, output_file, scratch_dir, batch_size=100, chunk_if_larger_gb=10):
     """
-    Computes signed distances between embeddings and cluster directions, resuming if partially written.
+    Computes signed distances between embeddings and cluster directions with chunking support.
 
     Args:
         embeds (Tensor): [N, D] embeddings
-        cluster_weights (dict): cluster_id -> weight tensor (1D)
+        concepts (dict): concept_id -> weight tensor (1D)
         dataset_name (str): Used for output folder
         device (str): 'cuda' or 'cpu'
         output_file (str): Filename to write to
+        scratch_dir (str): Scratch directory prefix
         batch_size (int): Batch size for processing
+        chunk_if_larger_gb (float): If file size exceeds this, save as chunks. Set to None to disable chunking.
     """
     concept_ids = [str(k) for k in concepts.keys()]
-    output_path = os.path.join(f"{scratch_dir}Distances", dataset_name, output_file)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_dir = os.path.join(f"{scratch_dir}Distances", dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Check how many rows already written
-    start_idx = 0
-    # if os.path.exists(output_path):
-    #     try:
-    #         with open(output_path, 'r') as f:
-    #             row_count = sum(1 for _ in f) - 1  # subtract header
-    #             if row_count > 0:
-    #                 start_idx = row_count
-    #                 print(f"Resuming from row {start_idx}")
-    #     except Exception as e:
-    #         print(f"Error checking existing file: {e}")
+    # Always save as chunks
+    if chunk_if_larger_gb is not None:
+        bytes_per_value = 8  # Average bytes per CSV value
+        bytes_per_gb = 1024 * 1024 * 1024
+        total_values = embeds.shape[0] * len(concept_ids)
+        estimated_size_gb = (total_values * bytes_per_value) / bytes_per_gb
+        
+        # Calculate number of chunks needed
+        if estimated_size_gb > chunk_if_larger_gb:
+            num_chunks = int(np.ceil(estimated_size_gb / chunk_if_larger_gb))
+            print(f"Estimated CSV size {estimated_size_gb:.2f}GB exceeds {chunk_if_larger_gb}GB threshold")
+        else:
+            num_chunks = 1
+            print(f"Estimated CSV size {estimated_size_gb:.2f}GB - saving as 1 chunk")
+            
+        rows_per_chunk = embeds.shape[0] // num_chunks
+        print(f"Saving as {num_chunks} chunk(s)")
+        
+        # Prepare weight matrix outside loop
+        weight_matrix = torch.stack([concepts[cid] for cid in concept_ids]).to(device).to(embeds.dtype)
+        
+        for chunk_idx in range(num_chunks):
+            start_row = chunk_idx * rows_per_chunk
+            end_row = (chunk_idx + 1) * rows_per_chunk if chunk_idx < num_chunks - 1 else embeds.shape[0]
+            
+            chunk_output_file = output_file.replace('.csv', f'_chunk_{chunk_idx}.csv')
+            chunk_output_path = os.path.join(output_dir, chunk_output_file)
+            
+            print(f"Processing chunk {chunk_idx}: rows {start_row}-{end_row}")
+            
+            with open(chunk_output_path, mode='w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=concept_ids)
+                writer.writeheader()
+                
+                with torch.no_grad():
+                    for i in tqdm(range(start_row, end_row, batch_size), 
+                                desc=f"Writing signed distances (chunk {chunk_idx})"):
+                        write_dist_row(writer, embeds, i, batch_size, device, weight_matrix, concept_ids)
+            
+            print(f"Chunk {chunk_idx} saved to {chunk_output_path}")
+        
+        print(f"All {num_chunks} chunk(s) saved successfully")
+        return
 
+    # Save as single file (only if chunk_if_larger_gb is None)
+    output_path = os.path.join(output_dir, output_file)
+    
     # Prepare weight matrix outside loop
     weight_matrix = torch.stack([concepts[cid] for cid in concept_ids]).to(device).to(embeds.dtype)
-    # weight_matrix = torch.nn.functional.normalize(weight_matrix, dim=1)
 
-    mode = 'a' if start_idx > 0 else 'w'
-    with open(output_path, mode=mode, newline='') as f:
+    with open(output_path, mode='w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=concept_ids)
-        if start_idx == 0:
-            writer.writeheader()
+        writer.writeheader()
 
         with torch.no_grad():
-            for i in tqdm(range(start_idx, embeds.shape[0], batch_size), desc="Writing signed distances"):
+            for i in tqdm(range(0, embeds.shape[0], batch_size), desc="Writing signed distances"):
                 write_dist_row(writer, embeds, i, batch_size, device, weight_matrix, concept_ids)
 
     print(f"Saved signed distances to: {output_path}")
@@ -2755,3 +2991,123 @@ def plot_train_history_justtrain(train_history, metric_type, concepts=None):
 
     plt.tight_layout()
     plt.show()
+
+def update_embedding_stats_json(dataset_name, embeddings_file, embeds_dic, model_input_size):
+    """
+    Update the embedding statistics JSON file when new embeddings are saved.
+    
+    Args:
+        dataset_name: Name of the dataset
+        embeddings_file: Filename of the embeddings (e.g., 'Llama_patch_embeddings_percentthrumodel_100.pt')
+        embeds_dic: Dictionary containing embeddings data
+        model_input_size: Input size used for the model
+    """
+    stats_file = 'Embeddings/embedding_stats.json'
+    
+    # Parse filename to extract model name, embedding type, and percent
+    filename_parts = embeddings_file.replace('.pt', '').split('_')
+    
+    # Extract model name (first part)
+    model_name = filename_parts[0]
+    
+    # Extract embedding type (patch or cls)
+    if 'patch' in embeddings_file:
+        embedding_type = 'patch'
+    elif 'cls' in embeddings_file:
+        embedding_type = 'cls'
+    else:
+        print(f"Warning: Could not determine embedding type from filename: {embeddings_file}")
+        return
+    
+    # Extract percent through model
+    if 'percentthrumodel' in embeddings_file:
+        idx = filename_parts.index('percentthrumodel')
+        if idx + 1 < len(filename_parts):
+            percent_thru_model = filename_parts[idx + 1]
+        else:
+            print(f"Warning: Could not extract percent from filename: {embeddings_file}")
+            return
+    else:
+        print(f"Warning: 'percentthrumodel' not found in filename: {embeddings_file}")
+        return
+    
+    # Load existing stats or create new structure
+    if os.path.exists(stats_file):
+        with open(stats_file, 'r') as f:
+            all_stats = json.load(f)
+    else:
+        all_stats = {}
+    
+    # Create nested structure if needed
+    if dataset_name not in all_stats:
+        all_stats[dataset_name] = {}
+    if model_name not in all_stats[dataset_name]:
+        all_stats[dataset_name][model_name] = {}
+    if embedding_type not in all_stats[dataset_name][model_name]:
+        all_stats[dataset_name][model_name][embedding_type] = {}
+    
+    # Extract statistics from the embeddings dictionary
+    stats = {
+        'filename': embeddings_file,
+        'filepath': f'Embeddings/{dataset_name}/{embeddings_file}',
+        'file_size_mb': os.path.getsize(f'Embeddings/{dataset_name}/{embeddings_file}') / (1024 * 1024)
+    }
+    
+    # Add mean embedding info
+    if 'mean_train_embedding' in embeds_dic:
+        mean_emb = embeds_dic['mean_train_embedding']
+        stats['mean_embedding_shape'] = list(mean_emb.shape)
+        stats['mean_embedding_dim'] = mean_emb.shape[0]
+        # Convert to list for JSON serialization
+        stats['mean_embedding'] = mean_emb.cpu().numpy().tolist()
+    
+    # Add norm info
+    if 'train_norm' in embeds_dic:
+        norm = embeds_dic['train_norm']
+        if isinstance(norm, torch.Tensor):
+            stats['train_norm'] = float(norm.item())
+        else:
+            stats['train_norm'] = float(norm)
+    
+    # Add embedding shape info
+    if 'normalized_embeddings' in embeds_dic:
+        emb = embeds_dic['normalized_embeddings']
+        stats['num_embeddings'] = emb.shape[0]
+        stats['embedding_dim'] = emb.shape[1]
+    
+    # Update the stats for this specific configuration
+    all_stats[dataset_name][model_name][embedding_type][percent_thru_model] = stats
+    
+    # Save updated stats
+    os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+    with open(stats_file, 'w') as f:
+        json.dump(all_stats, f, indent=2)
+    
+    # Also update the lite version (without embeddings)
+    stats_lite_file = stats_file.replace('.json', '_lite.json')
+    
+    # Create lite version by excluding mean_embedding
+    stats_lite = {k: v for k, v in stats.items() if k != 'mean_embedding'}
+    
+    # Load existing lite stats or create new
+    if os.path.exists(stats_lite_file):
+        with open(stats_lite_file, 'r') as f:
+            all_stats_lite = json.load(f)
+    else:
+        all_stats_lite = {}
+    
+    # Update lite stats
+    if dataset_name not in all_stats_lite:
+        all_stats_lite[dataset_name] = {}
+    if model_name not in all_stats_lite[dataset_name]:
+        all_stats_lite[dataset_name][model_name] = {}
+    if embedding_type not in all_stats_lite[dataset_name][model_name]:
+        all_stats_lite[dataset_name][model_name][embedding_type] = {}
+    
+    all_stats_lite[dataset_name][model_name][embedding_type][percent_thru_model] = stats_lite
+    
+    # Save lite stats
+    with open(stats_lite_file, 'w') as f:
+        json.dump(all_stats_lite, f, indent=2)
+    
+    print(f"Updated embedding stats for {dataset_name}/{model_name}/{embedding_type}/{percent_thru_model}")

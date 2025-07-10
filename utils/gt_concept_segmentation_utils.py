@@ -368,9 +368,12 @@ def compute_attention_masks(all_text_samples, processor, dataset_name, model_inp
     token_counts_per_sentence = []
     word_to_token_map_list = []
 
+    # Determine if processor has a tokenizer attribute (Llama) or is itself a tokenizer (Mistral)
+    tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+
     for sentence_id, text in tqdm(enumerate(all_text_samples), total=len(all_text_samples), desc="Tokenizing"):
         # Tokenize using *exactly the same settings* as get_llama_text_patch_embeddings
-        inputs = processor.tokenizer(
+        inputs = tokenizer(
             text,
             add_special_tokens=False,
             padding=False,
@@ -379,7 +382,7 @@ def compute_attention_masks(all_text_samples, processor, dataset_name, model_inp
         )
         token_ids = inputs["input_ids"].squeeze().tolist()
         offsets = inputs["offset_mapping"][0].tolist()
-        tokens = processor.tokenizer.convert_ids_to_tokens(token_ids)
+        tokens = tokenizer.convert_ids_to_tokens(token_ids)
 
         tokens_list.append(tokens)
 
@@ -437,9 +440,9 @@ def compute_attention_masks(all_text_samples, processor, dataset_name, model_inp
     out_dir = f'GT_Samples/{dataset_name}'
     os.makedirs(out_dir, exist_ok=True)
 
-    torch.save(tokens_list, f'{out_dir}/tokens.pt')
-    torch.save(token_counts_per_sentence, f'{out_dir}/token_counts.pt')
-    torch.save(word_to_token_map_list, f'{out_dir}/word_to_token_map.pt')
+    torch.save(tokens_list, f'{out_dir}/tokens_inputsize_{model_input_size}.pt')
+    torch.save(token_counts_per_sentence, f'{out_dir}/token_counts_inputsize_{model_input_size}.pt')
+    torch.save(word_to_token_map_list, f'{out_dir}/word_to_token_map_inputsize_{model_input_size}.pt')
     torch.save(relevant_tokens, f'{out_dir}/patches_w_image_mask_inputsize_{model_input_size}.pt')
 
     print(f"\n✅ Saved tokenized outputs to {out_dir}")
@@ -593,11 +596,14 @@ def map_sentence_to_concept_gt(dataset_name, model_input_size, one_indexed):
     if 'Sarcasm' in dataset_name:
         word_df = pd.read_csv(f'../Data/{dataset_name}/word_level_sarcasm.csv')
         sentence_df = pd.read_csv(f'../Data/{dataset_name}/paragraph_level_sarcasm.csv')
+    elif 'Emotion' in dataset_name:
+        word_df = pd.read_csv(f'../Data/{dataset_name}/word_level_emotion.csv')
+        sentence_df = pd.read_csv(f'../Data/{dataset_name}/paragraph_level_emotion.csv')
     else:
         word_df = pd.read_csv(f'../Data/{dataset_name}/word_level_sentiment.csv')
         sentence_df = pd.read_csv(f'../Data/{dataset_name}/sentence_level_sentiment.csv')
-    word_to_token_map_list = torch.load(f'GT_Samples/{dataset_name}/word_to_token_map.pt', weights_only=False)
-    tokens_list = torch.load(f'GT_Samples/{dataset_name}/tokens.pt', weights_only=False)  # needed for global index offset
+    word_to_token_map_list = torch.load(f'GT_Samples/{dataset_name}/word_to_token_map_inputsize_{model_input_size}.pt', weights_only=False)
+    tokens_list = torch.load(f'GT_Samples/{dataset_name}/tokens_inputsize_{model_input_size}.pt', weights_only=False)  # needed for global index offset
     split_df = get_split_df(dataset_name)
 
     # Infer concept columns
@@ -616,7 +622,7 @@ def map_sentence_to_concept_gt(dataset_name, model_input_size, one_indexed):
     sentence_indices_test = defaultdict(set)
     sentence_indices_cal = defaultdict(set)
 
-    if 'Sarcasm' in dataset_name:
+    if 'Sarcasm' in dataset_name or 'Emotion' in dataset_name:
         word_groups = word_df.groupby("paragraph_id")
     else:
         word_groups = word_df.groupby("sentence_id")
@@ -717,15 +723,18 @@ def print_paragraph_or_sentence_gt_examples(dataset_name, model_input_size, num_
     # Load GT dictionaries
     concept_gt = torch.load(f"{gt_dir}/gt_samples_per_concept_inputsize_{model_input_size}.pt", weights_only=False)
     token_gt = torch.load(f"{gt_dir}/gt_patches_per_concept_inputsize_{model_input_size}.pt", weights_only=False)
-    tokenized_sentences = torch.load(f"{gt_dir}/tokens.pt", weights_only=False)
+    tokenized_sentences = torch.load(f"{gt_dir}/tokens_inputsize_{model_input_size}.pt", weights_only=False)
 
     # Load sentences or paragraphs
-    if level == "sentence":
-        text_df = pd.read_csv(f"{data_dir}/sentence_level_sentiment.csv")
-        texts = text_df["sentence"].tolist()
-    else:  # paragraph
+    if 'Sarcasm' in dataset_name:
         paragraph_df = pd.read_csv(f"{data_dir}/paragraph_level_sarcasm.csv")
         texts = paragraph_df["text"].tolist()
+    elif 'Emotion' in dataset_name:
+        paragraph_df = pd.read_csv(f"{data_dir}/paragraph_level_emotion.csv")
+        texts = paragraph_df["text"].tolist()
+    else:
+        text_df = pd.read_csv(f"{data_dir}/sentence_level_sentiment.csv")
+        texts = text_df["sentence"].tolist()
 
     print(f"\n=== {level.capitalize()}-Level GT Examples ===")
     for concept, indices in list(concept_gt.items())[:num_examples]:
