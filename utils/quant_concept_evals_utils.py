@@ -3,10 +3,13 @@ import os
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
+import math
 from tqdm import tqdm
 import random
+import gc
 from collections import defaultdict
 from torch.nn.utils.rnn import pad_sequence
+import glob
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -25,8 +28,14 @@ importlib.reload(utils.text_visualization_utils)
 
 from utils.general_utils import compute_cossim_w_vector, get_split_df, create_binary_labels, retrieve_topn_images_byconcepts
 from utils.patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence, get_image_idx_from_global_patch_idx, compute_patches_per_image
-from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices
+from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, remap_text_ground_truth_indices
 from utils.text_visualization_utils import get_glob_tok_indices_from_sent_idx, get_sent_idx_from_global_token_idx
+from typing import Dict, List, Tuple, Union, Optional
+from utils.memory_management_utils import MatchedConceptActivationLoader, ChunkedActivationLoader
+from utils.loader_compatible_functions import (
+    get_patch_detection_tensor as get_patch_detection_tensor_loader,
+    compute_inversion_metrics
+)
 
 ############# Find Thresholds for Concepts #############
 def compute_avg_rand_threshold(embeddings, patch_indices, percentile, n_vectors=5, device="cuda"):
@@ -136,7 +145,7 @@ def compute_concept_thresholds(gt_samples_per_concept_cal, cos_sims, percentile,
         sample_indices = gt_samples_per_concept_cal[concept]
         # rand_threshold = compute_avg_rand_threshold(embeddings, sample_indices, percentile, n_vectors=n_vectors, device=device)
         threshold_val = thresholds_tensor[i].item()
-        concept_thresholds[concept] = (threshold_val, np.nan)#rand_threshold)
+        concept_thresholds[concept] = (threshold_val, float('nan'))  # Use Python nan instead of numpy
 
     if n_concepts_to_print > 0: 
         print(f"Concept thresholds using {percentile*100:.1f}%:")
@@ -155,13 +164,14 @@ def compute_concept_thresholds(gt_samples_per_concept_cal, cos_sims, percentile,
     return concept_thresholds
 
 
-def compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, cos_sims, percentiles, device, dataset_name, con_label, n_vectors=5, n_concepts_to_print=0):
+def compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, loader, percentiles, device, dataset_name, con_label, n_vectors=5, n_concepts_to_print=0):
     """
-    Computes thresholds for multiple percentiles with efficient caching.
+    Computes thresholds for multiple percentiles using chunked activation data.
+    Only loads the calibration samples needed for threshold computation.
     
     Args:
-        gt_samples_per_concept (dict): Mapping of concept to list of patch indices
-        cos_sims (pd.DataFrame): Cosine similarity matrix (rows: patches, columns: concepts)
+        gt_samples_per_concept_cal (dict): Mapping of concept to list of cal sample indices
+        loader (ChunkedActivationLoader): Loader for chunked activation files
         percentiles (list): List of percentile values to compute thresholds for
         device (str): Compute device (e.g., "cuda")
         dataset_name (str): Name of dataset for cache file
@@ -172,9 +182,93 @@ def compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, cos_
     Returns:
         dict: Mapping from percentile -> concept -> (threshold, random_threshold)
     """
-    cache_file = f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
+    from utils.memory_management_utils import ChunkedActivationLoader
     
-    # Try to load existing thresholds
+    cache_file = f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
+    all_thresholds = {}
+    new_percentiles = set(percentiles)
+    
+    if new_percentiles:
+        # Get all unique calibration indices we need
+        all_cal_indices = set()
+        for concept, indices in gt_samples_per_concept_cal.items():
+            all_cal_indices.update(indices)
+        all_cal_indices = sorted(list(all_cal_indices))
+        
+        print(f"   Loading activations for {len(all_cal_indices)} calibration samples...")
+        
+        # Determine the range of rows we need
+        min_idx = min(all_cal_indices)
+        max_idx = max(all_cal_indices)
+        
+        # Load only the range containing calibration samples
+        cal_acts_tensor = loader.load_chunk_range(min_idx, max_idx + 1)
+        
+        # Create a mapping from original indices to tensor row positions
+        idx_to_position = {idx: pos for pos, idx in enumerate(range(min_idx, max_idx + 1))}
+        
+        # Get concept names and info from loader
+        loader_info = loader.get_activation_info() if hasattr(loader, 'get_activation_info') else loader.get_info()
+        all_concept_names = loader_info['concept_names']
+        concept_names = list(gt_samples_per_concept_cal.keys())
+        
+        # Move tensor to device if needed
+        cos_sims_tensor = cal_acts_tensor.to(device)
+        sims_list = []
+        valid_concepts = []  # Track which concepts we actually process
+        
+        # Gather cosine similarity scores for each concept
+        for concept in concept_names:
+            # Find column index for this concept
+            col_idx = all_concept_names.index(str(concept)) if str(concept) in all_concept_names else -1
+            if col_idx == -1:
+                continue
+                
+            sample_indices = gt_samples_per_concept_cal[concept]
+            
+            # Map original indices to positions in our loaded chunk
+            chunk_positions = [idx_to_position[idx] for idx in sample_indices if idx in idx_to_position]
+            
+            if len(chunk_positions) > 0:
+                sims = cos_sims_tensor[chunk_positions, col_idx]
+                sims_list.append(sims)
+                valid_concepts.append(concept)  # Add to valid concepts
+            else:
+                # No samples for this concept in cal set
+                sims_list.append(torch.tensor([], device=device))
+                valid_concepts.append(concept)  # Still add to valid concepts
+        
+        # Pad sequences for batch processing
+        padded_sims = pad_sequence(sims_list, batch_first=True, padding_value=float('nan'))
+        
+        # Convert new percentiles to tensor and compute quantiles
+        # For percentile p, we want the (1-p) quantile so that p fraction of values are above threshold
+        percentiles_tensor = torch.tensor([(1 - p) for p in new_percentiles], device=device)
+        batch_thresholds = torch.nanquantile(padded_sims, percentiles_tensor, dim=1, interpolation='linear')
+        
+        # Organize results
+        for i, p in enumerate(new_percentiles):
+            if p not in all_thresholds:
+                all_thresholds[p] = {}
+            
+            for j, concept in enumerate(valid_concepts):
+                if j < batch_thresholds.shape[1]:  # Safety check
+                    threshold = batch_thresholds[i, j].item()
+                    all_thresholds[p][concept] = (threshold, 0)  # (threshold, random_threshold)
+        
+        # Save all thresholds
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        torch.save(all_thresholds, cache_file)
+        
+        # Clear memory
+        del cos_sims_tensor, cal_acts_tensor
+        gc.collect()
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+    
+    return {p: all_thresholds[p] for p in percentiles}
+
+
 #     try:
 #         all_thresholds = torch.load(cache_file)
 #         existing_percentiles = set(all_thresholds.keys())
@@ -213,7 +307,7 @@ def compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, cos_
             concept_thresholds = {}
             for c_idx, concept in enumerate(concept_names):
                 threshold_val = thresholds_tensor[p_idx, c_idx].item()
-                concept_thresholds[concept] = (threshold_val, np.nan)
+                concept_thresholds[concept] = (threshold_val, float('nan'))  # Use Python nan
             
             all_thresholds[percentile] = concept_thresholds
             
@@ -781,125 +875,105 @@ def timer(name):
     
 #     return final_metrics
 def detect_then_invert_metrics(
-    detect_percentile,
-    invert_percentiles,
-    act_metrics,
-    concepts,
-    gt_samples_per_concept,
-    gt_samples_per_concept_cal,
-    relevant_indices,
-    all_concept_labels,
-    device,
-    dataset_name,
-    model_input_size,
-    con_label,
-    all_object_patches=None,
-    patch_size=14
+    detect_percentile: float,
+    invert_percentiles: List[float],
+    act_loader: Union[MatchedConceptActivationLoader, ChunkedActivationLoader],
+    concepts: Dict,
+    gt_samples_per_concept: Dict,
+    gt_samples_per_concept_cal: Dict,
+    relevant_indices: torch.Tensor,
+    all_concept_labels: Dict,
+    device: str,
+    dataset_name: str,
+    model_input_size: Tuple,
+    con_label: str,
+    all_object_patches: Optional[Dict] = None,
+    patch_size: int = 14,
+    embedding_loader=None,
+    split: str = 'cal'
 ):
-    # Compute all thresholds
-    all_percentiles = [detect_percentile] + list(invert_percentiles)
-    # thresholds = compute_concept_thresholds_over_percentiles(
-    #     gt_samples_per_concept_test,
-    #     act_metrics,
-    #     all_percentiles,
-    #     device=device,
-    #     dataset_name=f'{dataset_name}-Cal',
-    #     con_label=con_label,
-    #     n_vectors=1,
-    #     n_concepts_to_print=0
-    # )
+    """
+    Memory-efficient version of detect_then_invert_metrics using activation loader.
+    
+    Args:
+        detect_percentile: Detection threshold percentile
+        invert_percentiles: List of inversion threshold percentiles
+        act_loader: Activation loader (MatchedConceptActivationLoader or ChunkedActivationLoader)
+        concepts: Concept vectors
+        gt_samples_per_concept: Ground truth samples per concept
+        gt_samples_per_concept_cal: Calibration ground truth samples
+        relevant_indices: Relevant sample indices
+        all_concept_labels: Binary labels for all concepts
+        device: Compute device
+        dataset_name: Dataset name
+        model_input_size: Model input dimensions
+        con_label: Concept label
+        all_object_patches: Optional object patches
+        patch_size: Patch size
+        embedding_loader: ChunkedEmbeddingLoader instance for computing cosine similarities
+        
+    Returns:
+        Dict of metrics for each inversion percentile
+    """
+    # Load thresholds
     if 'kmeans' not in con_label:
-        thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+        threshold_path = f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
+        thresholds = torch.load(threshold_path, weights_only=False)
     else:
-        # Load files
+        # Load files for kmeans
         raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
-
+        
         # Collect matched thresholds per percentile
+        # Use concept names as keys for consistency with supervised methods
         thresholds = {}
-
         for percentile, thresholds_dict in raw_thresholds.items():
             matched_thresholds = {}
-
             for concept, info in alignment_results.items():
                 cluster_id = info['best_cluster']
                 key = (concept, cluster_id)
-
                 if key in thresholds_dict:
-                    matched_thresholds[cluster_id] = thresholds_dict[key]  # keep full (val, nan) tuple
-
+                    matched_thresholds[concept] = thresholds_dict[key]
             thresholds[percentile] = matched_thresholds
 
-    # Detection mask from detection threshold
+    # Get detection thresholds
     detect_thresholds = thresholds[detect_percentile]
-    detected_patch_masks = get_patch_detection_tensor(
-        act_metrics, detect_thresholds, model_input_size, dataset_name
+    # Get detected patches using loader-compatible function
+    # Use the specified split (cal for calibration, test for test evaluation)
+    detected_patches = get_patch_detection_tensor_loader(
+        act_loader, detect_thresholds, model_input_size, dataset_name, patch_size, split=split
     )
-
-    concept_keys = set(detect_thresholds.keys()) & set(concepts.keys())
-
-    if all_object_patches is not None:
-        relevant_indices = torch.tensor(
-            [int(idx.item()) for idx in relevant_indices if int(idx.item()) in all_object_patches]
-        )
-
-    relevant_indices_list = relevant_indices.tolist()
-    n_concepts = len(concept_keys)
-    n_samples = len(relevant_indices)
-
-    act_vals_all = torch.zeros((n_samples, n_concepts), device=device)
-    detected_patches_all = torch.zeros((n_samples, n_concepts), dtype=torch.bool, device=device)
-    gt_masks_all = torch.zeros((n_samples, n_concepts), dtype=torch.bool, device=device)
-
-    for i, concept in enumerate(concept_keys):
-        act_vals_all[:, i] = torch.tensor(
-            act_metrics[str(concept)].loc[relevant_indices_list].values, device=device
-        )
-        detected_patches_all[:, i] = torch.tensor(
-            detected_patch_masks[concept].loc[relevant_indices_list].values, device=device
-        )
-        vals = all_concept_labels[concept][relevant_indices_list]
-        if isinstance(vals, torch.Tensor):
-            mask = (vals == 1).clone().detach().to(device)
-        else:
-            mask = torch.tensor(vals == 1, device=device)
-
-        gt_masks_all[:, i] = mask
-
-    metrics_dfs = {p: {'tp_count': {}, 'fp_count': {}, 'tn_count': {}, 'fn_count': {}} for p in invert_percentiles}
-
+    
+    # Filter to concepts that exist in thresholds, concepts, AND ground truth labels
+    concept_keys = set(detect_thresholds.keys()) & set(concepts.keys()) & set(all_concept_labels.keys())
+    
+    # Compute metrics for each inversion percentile
+    results = {}
+    
     for invert_percentile in invert_percentiles:
-        thresh_tensor = torch.tensor(
-            [thresholds[invert_percentile][c][0] for c in concept_keys], device=device
+        invert_thresholds = thresholds[invert_percentile]
+        
+        
+        # Compute inversion metrics using loader
+        inversion_metrics = compute_inversion_metrics(
+            act_loader,
+            {k: concepts[k] for k in concept_keys},
+            invert_thresholds,
+            detected_patches,
+            relevant_indices,
+            all_concept_labels,
+            device,
+            embedding_loader
         )
-
-        activated_patches = (act_vals_all >= thresh_tensor.unsqueeze(0)) & detected_patches_all
-
-        tp_counts = torch.sum(activated_patches & gt_masks_all, dim=0)
-        fn_counts = torch.sum((~activated_patches) & gt_masks_all, dim=0)
-        fp_counts = torch.sum(activated_patches & (~gt_masks_all), dim=0)
-        tn_counts = torch.sum((~activated_patches) & (~gt_masks_all), dim=0)
-
-        for i, concept in enumerate(concept_keys):
-            metrics_dfs[invert_percentile]['tp_count'][concept] = tp_counts[i].item()
-            metrics_dfs[invert_percentile]['fn_count'][concept] = fn_counts[i].item()
-            metrics_dfs[invert_percentile]['fp_count'][concept] = fp_counts[i].item()
-            metrics_dfs[invert_percentile]['tn_count'][concept] = tn_counts[i].item()
-
-    final_metrics = {}
-    for invert_percentile in invert_percentiles:
-        counts = metrics_dfs[invert_percentile]
-        metrics_df = compute_concept_metrics(
-            counts['fp_count'], counts['fn_count'],
-            counts['tp_count'], counts['tn_count'],
-            concept_keys, dataset_name, con_label,
-            just_obj=(all_object_patches is not None),
-            invert_percentile=invert_percentile,
-            detect_percentile=detect_percentile
-        )
-        final_metrics[invert_percentile] = metrics_df
-
-    return final_metrics
+        
+        # Save results
+        os.makedirs(f'Quant_Results/{dataset_name}', exist_ok=True)
+        save_path = f'Quant_Results/{dataset_name}/detectfirst_{detect_percentile}_invert_{invert_percentile}_{con_label}.pt'
+        torch.save(inversion_metrics, save_path)
+        
+        results[invert_percentile] = inversion_metrics
+        
+    return results
 
 
 
@@ -993,104 +1067,175 @@ def detect_then_invert_metrics(
 #     return final_metrics
 
 
-def detect_then_invert_metrics_over_percentiles(detect_percentiles, invert_percentiles, 
-                                              act_metrics, concepts, gt_samples_per_concept, 
-                                              gt_samples_per_concept_cal, device, dataset_name, 
-                                              model_input_size, con_label, all_object_patches=None,
-                                              patch_size=14):
+def detect_then_invert_metrics_over_percentiles(
+    detect_percentiles: List[float],
+    invert_percentiles: List[float],
+    act_loader: Union[MatchedConceptActivationLoader, ChunkedActivationLoader],
+    concepts: Dict,
+    gt_samples_per_concept: Dict,
+    gt_samples_per_concept_cal: Dict,
+    device: str,
+    dataset_name: str,
+    model_input_size: Tuple,
+    con_label: str,
+    all_object_patches: Optional[Dict] = None,
+    patch_size: int = 14,
+    use_best_detection_percentiles: bool = True,
+    embedding_loader=None
+):
     """
-    Evaluates metrics across all detect percentile combinations on CALIBRATION set.
-    This is used to find optimal thresholds - always uses calibration split.
-    More efficient version that handles multiple invert percentiles at once.
-    """
-    # Compute all thresholds at once for caching
-    all_percentiles = sorted(list(set(detect_percentiles) | set(invert_percentiles)))
-    # thresholds = compute_concept_thresholds_over_percentiles(
-    #     gt_samples_per_concept_test,
-    #     act_metrics,
-    #     all_percentiles,
-    #     device=device,
-    #     dataset_name=f'{dataset_name}-Cal',
-    #     con_label=con_label,
-    #     n_vectors=1,
-    #     n_concepts_to_print=0
-    # )
-    if 'kmeans' not in con_label:
-        thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
-    else:
-        # Load files
-        raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
-        alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
-
-        # Collect matched thresholds per percentile
-        thresholds = {}
-
-        for percentile, thresholds_dict in raw_thresholds.items():
-            matched_thresholds = {}
-
-            for concept, info in alignment_results.items():
-                cluster_id = info['best_cluster']
-                key = (concept, cluster_id)
-
-                if key in thresholds_dict:
-                    matched_thresholds[cluster_id] = thresholds_dict[key]  # keep full (val, nan) tuple
-
-            thresholds[percentile] = matched_thresholds
+    Memory-efficient version using activation loader instead of full DataFrame.
+    Evaluates metrics across all detect/invert percentile combinations on calibration set.
     
-    total_iters = len(detect_percentiles)  # Now we only iterate over detect percentiles
-    pbar = tqdm(total=total_iters, desc="Evaluating thresholds")
-
-    # Get the split dataframe and indices - USE CALIBRATION SET
-    split_df = get_patch_split_df(dataset_name, patch_size=patch_size, model_input_size=model_input_size)
-    cal_indices = torch.tensor(split_df.index[split_df == 'cal'].tolist())
+    Args:
+        detect_percentiles: List of detection percentiles to evaluate
+        invert_percentiles: List of inversion percentiles to evaluate
+        act_loader: Activation loader instead of act_metrics DataFrame
+        concepts: Concept vectors
+        gt_samples_per_concept: Ground truth samples per concept
+        gt_samples_per_concept_cal: Calibration ground truth samples
+        device: Compute device
+        dataset_name: Dataset name
+        model_input_size: Model input dimensions
+        con_label: Concept label
+        all_object_patches: Optional object patches
+        patch_size: Patch size
+        use_best_detection_percentiles: If True, use best detection percentiles from calibration
+        embedding_loader: ChunkedEmbeddingLoader instance for computing cosine similarities
+    """
+    # Load best detection percentiles if requested (REQUIRED when use_best_detection_percentiles=True)
+    best_detection_percentiles = None
+    if use_best_detection_percentiles:
+        best_detection_file = f'Best_Detection_Percentiles_Cal/{dataset_name}/best_percentiles_{con_label}.pt'
+        if not os.path.exists(best_detection_file):
+            raise FileNotFoundError(
+                f"Best detection percentiles file not found at {best_detection_file}\n"
+                f"Please run all_detection_stats.py first to generate best detection percentiles."
+            )
+        best_detection_percentiles = torch.load(best_detection_file, weights_only=False)
+        print(f"Using best detection percentiles from {best_detection_file}")
+    
+    # Get the split dataframe and indices - USE CALIBRATION SET  
+    from utils.general_utils import get_split_df
+    split_df = get_split_df(dataset_name)
+    
+    # For text datasets, get calibration sentence indices
     if model_input_size[0] == 'text':
-        relevant_indices = cal_indices
+        token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
+        token_counts_per_sentence = torch.load(token_counts_file, weights_only=False)
+        cal_sentence_indices = [i for i in range(len(token_counts_per_sentence)) if split_df.get(i) == 'cal']
+        cal_indices = torch.tensor(cal_sentence_indices)
+    else:
+        # For image datasets, use patch-based approach  
+        split_df_patch = get_patch_split_df(dataset_name, model_input_size=model_input_size, patch_size=patch_size)
+        cal_indices = torch.tensor(split_df_patch.index[split_df_patch == 'cal'].tolist())
+    
+    if model_input_size[0] == 'text':
+        # GLOBAL INDICES APPROACH: Use ALL dataset token indices, filter by split in ground truth
+        loader_info = act_loader.get_activation_info() if hasattr(act_loader, 'get_activation_info') else act_loader.get_info()
+        total_tokens = loader_info['total_samples']
+        
+        # Use all token indices - no split-specific filtering here
+        relevant_indices = torch.arange(total_tokens)  # 0, 1, 2, ..., total_tokens-1
+        
     else:
         relevant_indices = filter_patches_by_image_presence(cal_indices, dataset_name, model_input_size)
-
-    # Get ground truth labels from calibration set
-    all_concept_labels = create_binary_labels(len(split_df), gt_samples_per_concept_cal)
     
-    for detect_percentile in detect_percentiles:
-        # Get valid invert percentiles for this detect percentile
-        valid_invert_percentiles = [p for p in invert_percentiles if p >= detect_percentile]
+    # Get ground truth labels from calibration set
+    loader_info = act_loader.get_activation_info() if hasattr(act_loader, 'get_activation_info') else act_loader.get_info()
+    total_samples = loader_info['total_samples']
+    
+    # GLOBAL INDICES: Keep ground truth in global indices, no remapping!
+    if model_input_size[0] == 'text':
+        # Filter ground truth to only include tokens from calibration sentences
+        filtered_gt = {}
+        for concept, indices in gt_samples_per_concept_cal.items():
+            # Keep original global indices - no remapping needed!
+            filtered_gt[concept] = set(indices)
         
-        if not valid_invert_percentiles:
-            continue
+        all_concept_labels = create_binary_labels(total_samples, filtered_gt)
+    else:
+        all_concept_labels = create_binary_labels(total_samples, gt_samples_per_concept_cal)
+    
+    if use_best_detection_percentiles:
+        # Process with batch optimization but NO persistent caching (to overwrite old files)
+        print(f"Processing {len(invert_percentiles)} inversion percentiles...")
+        
+        # Load all thresholds we need
+        if 'kmeans' not in con_label:
+            all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+        else:
+            raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
+            alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
+        
+        # Process each inversion percentile
+        pbar = tqdm(invert_percentiles, desc="Evaluating inversion thresholds")
+        for invert_percentile in pbar:
+            # Group concepts by detection percentile for batch processing
+            concepts_by_detect = {}
             
-
-        # Compute metrics for all valid invert percentiles at once
-        metrics = detect_then_invert_metrics(
-            detect_percentile, valid_invert_percentiles,
-            act_metrics, concepts,
-            gt_samples_per_concept, gt_samples_per_concept_cal,
-            relevant_indices, all_concept_labels,
-            device, dataset_name, model_input_size, con_label,
-            all_object_patches=None,
-            patch_size=patch_size
-        )
+            for concept, info in best_detection_percentiles.items():
+                if concept not in concepts:
+                    continue
+                detect_perc = info['best_percentile']
+                
+                # Only process if invert >= detect
+                if invert_percentile >= detect_perc:
+                    if detect_perc not in concepts_by_detect:
+                        concepts_by_detect[detect_perc] = []
+                    concepts_by_detect[detect_perc].append(concept)
+            
+            # Process each detection group
+            for detect_perc, concept_list in concepts_by_detect.items():
+                # OPTIMIZATION: Batch process all concepts with same detection percentile
+                filtered_concepts = {c: concepts[c] for c in concept_list if c in concepts}
+                
+                if filtered_concepts:
+                    # Call detect_then_invert_metrics once for this batch
+                    metrics = detect_then_invert_metrics(
+                        detect_perc, [invert_percentile],
+                        act_loader, filtered_concepts,
+                        gt_samples_per_concept, gt_samples_per_concept_cal,
+                        relevant_indices, all_concept_labels,
+                        device, dataset_name, model_input_size, con_label,
+                        all_object_patches=all_object_patches,
+                        patch_size=patch_size,
+                        embedding_loader=embedding_loader
+                    )
+    else:
+        # Original behavior: evaluate all combinations
+        total_iters = len(detect_percentiles)
+        pbar = tqdm(total=total_iters, desc="Evaluating thresholds")
         
-        
-#     # Compute metrics with object patches for all valid invert percentiles
-#     if all_object_patches is not None:
-#         metrics = detect_then_invert_metrics(
-#             detect_percentile, valid_invert_percentiles,
-#             act_metrics, concepts,
-#             gt_samples_per_concept, gt_samples_per_concept_cal,
-#             device, dataset_name, model_input_size, con_label,
-#             all_object_patches=all_object_patches, n_trials=n_trials,
-#             balance_dataset=balance_dataset, patch_size=patch_size
-#         )
-        
-        pbar.update(1)
+        for detect_percentile in detect_percentiles:
+            # Get valid invert percentiles for this detect percentile
+            valid_invert_percentiles = [p for p in invert_percentiles if p >= detect_percentile]
+            
+            if not valid_invert_percentiles:
+                continue
+            
+            # Compute metrics for all valid invert percentiles at once
+            metrics = detect_then_invert_metrics(
+                detect_percentile, valid_invert_percentiles,
+                act_loader, concepts,
+                gt_samples_per_concept, gt_samples_per_concept_cal,
+                relevant_indices, all_concept_labels,
+                device, dataset_name, model_input_size, con_label,
+                all_object_patches=all_object_patches,
+                patch_size=patch_size,
+                embedding_loader=embedding_loader
+            )
+            
+            pbar.update(1)
     
     pbar.close()
 
 
-def find_optimal_detect_invert_thresholds(detect_percentiles, invert_percentiles, dataset_name, 
+def find_optimal_detect_invert_thresholds(invert_percentiles, dataset_name, 
                                         con_label, optimization_metric='f1'):
     """
     Find optimal detect/invert percentile pairs for each concept from calibration results.
+    Uses detection thresholds from Best_Detection_Percentiles_Cal and finds best inversion thresholds.
     Must be run AFTER detect_then_invert_metrics_over_percentiles.
     """
     import os
@@ -1099,47 +1244,56 @@ def find_optimal_detect_invert_thresholds(detect_percentiles, invert_percentiles
     optimal_thresholds = {}
     results_dir = f"Quant_Results/{dataset_name}"
     
-    # Get all concepts from any results file
+    # Load best detection percentiles from calibration (REQUIRED)
+    best_detection_file = f'Best_Detection_Percentiles_Cal/{dataset_name}/best_percentiles_{con_label}.pt'
+    if not os.path.exists(best_detection_file):
+        raise FileNotFoundError(
+            f"Best detection percentiles file not found at {best_detection_file}\n"
+            f"Please run all_detection_stats.py first to generate best detection percentiles."
+        )
+    
+    best_detection_percentiles = torch.load(best_detection_file, weights_only=False)
+    print(f"Loaded best detection percentiles from {best_detection_file}")
+    
+    # Get all concepts from any results file (.pt files now)
     concept_names = set()
     
-    for detect_p in detect_percentiles:
-        for invert_p in invert_percentiles:
-            if invert_p >= detect_p:
-                filename = f"{results_dir}/detectfirst_{detect_p*100}_per_{invert_p*100}_{con_label}.csv"
-                try:
-                    df = pd.read_csv(filename)
-                    concept_names.update(df['concept'].astype(str))
-                    break
-                except FileNotFoundError:
-                    continue
-        if concept_names:
-            break
+    # Use concepts from best detection percentiles
+    concept_names = set(best_detection_percentiles.keys())
     
     print(f"Finding optimal thresholds for {len(concept_names)} concepts using {optimization_metric}...")
     
-    # For each concept, find best detect/invert combination
+    # For each concept, find best invert threshold using fixed detection threshold
     for concept in tqdm(concept_names, desc="Optimizing concepts"):
         best_score = -1
         best_detect = None
         best_invert = None
         
-        for detect_p in detect_percentiles:
-            for invert_p in invert_percentiles:
-                if invert_p >= detect_p:  # Valid combination
-                    filename = f"{results_dir}/detectfirst_{detect_p*100}_per_{invert_p*100}_{con_label}.csv"
-                    try:
-                        df = pd.read_csv(filename)
-                        # Find the row for this concept
-                        concept_row = df[df['concept'] == str(concept)]
-                        if not concept_row.empty and optimization_metric in concept_row.columns:
-                            score = concept_row[optimization_metric].iloc[0]
+        if concept not in best_detection_percentiles:
+            print(f"  Warning: Concept {concept} not found in best detection percentiles, skipping...")
+            continue
+            
+        # Use the best detection percentile from calibration
+        fixed_detect_p = best_detection_percentiles[concept]['best_percentile']
+        
+        # Search only over inversion thresholds >= detection threshold
+        for invert_p in invert_percentiles:
+            if invert_p >= fixed_detect_p:  # Valid combination
+                # Only use .pt files
+                pt_filename = f"{results_dir}/detectfirst_{fixed_detect_p}_invert_{invert_p}_{con_label}.pt"
+                
+                try:
+                    if os.path.exists(pt_filename):
+                        results = torch.load(pt_filename, weights_only=False)
+                        if str(concept) in results and optimization_metric in results[str(concept)]:
+                            score = results[str(concept)][optimization_metric]
                             # Handle NaN scores
-                            if pd.notna(score) and score > best_score:
+                            if not math.isnan(score) and score > best_score:
                                 best_score = score
-                                best_detect = detect_p
+                                best_detect = fixed_detect_p
                                 best_invert = invert_p
-                    except FileNotFoundError:
-                        continue
+                except Exception as e:
+                    continue
         
         # Store optimal thresholds for this concept
         if best_detect is not None:
@@ -1167,13 +1321,28 @@ def find_optimal_detect_invert_thresholds(detect_percentiles, invert_percentiles
                 'invert_threshold': invert_threshold,
                 f'best_{optimization_metric}': best_score
             }
+            
+            if concept == 'sarcasm':
+                print(f"\n🔍 DEBUG - Optimal thresholds for '{concept}':")
+                print(f"   Best detection percentile: {best_detect}")
+                print(f"   Best inversion percentile: {best_invert}")
+                print(f"   Best {optimization_metric} score: {best_score:.4f}")
         else:
             print(f"  Warning: No valid thresholds found for concept {concept}")
     
-    # Save optimal thresholds
-    os.makedirs(f'Detect_Invert_Thresholds/{dataset_name}', exist_ok=True)
-    threshold_file = f'Detect_Invert_Thresholds/{dataset_name}/optimal_{optimization_metric}_{con_label}.pt'
-    torch.save(optimal_thresholds, threshold_file)
+    # Save optimal thresholds to both locations
+    # Save inversion percentiles to Best_Inversion_Percentiles_Cal
+    os.makedirs(f'Best_Inversion_Percentiles_Cal/{dataset_name}', exist_ok=True)
+    best_inversion_percentiles = {}
+    for concept, info in optimal_thresholds.items():
+        best_inversion_percentiles[concept] = {
+            'best_percentile': info['invert_percentile'],
+            'best_threshold': info['invert_threshold'],
+            f'best_{optimization_metric}': info[f'best_{optimization_metric}']
+        }
+    inversion_file = f'Best_Inversion_Percentiles_Cal/{dataset_name}/best_inversion_percentiles_{con_label}.pt'
+    torch.save(best_inversion_percentiles, inversion_file)
+    print(f"  Saved best inversion percentiles to: {inversion_file}")
     
     # Print summary
     if optimal_thresholds:
@@ -1182,123 +1351,182 @@ def find_optimal_detect_invert_thresholds(detect_percentiles, invert_percentiles
         scores = [v[f'best_{optimization_metric}'] for v in optimal_thresholds.values()]
         
         print(f"\nOptimization Summary ({len(optimal_thresholds)} concepts):")
-        print(f"  Avg detect percentile: {np.mean(detect_percs):.3f} ± {np.std(detect_percs):.3f}")
-        print(f"  Avg invert percentile: {np.mean(invert_percs):.3f} ± {np.std(invert_percs):.3f}")
-        print(f"  Avg {optimization_metric}: {np.mean(scores):.3f} ± {np.std(scores):.3f}")
-        print(f"  Saved to: {threshold_file}")
+        detect_tensor = torch.tensor(detect_percs)
+        invert_tensor = torch.tensor(invert_percs)
+        scores_tensor = torch.tensor(scores)
+        
+        if len(optimal_thresholds) > 1:
+            print(f"  Avg detect percentile: {detect_tensor.mean():.3f} ± {detect_tensor.std():.3f}")
+            print(f"  Avg invert percentile: {invert_tensor.mean():.3f} ± {invert_tensor.std():.3f}")
+            print(f"  Avg {optimization_metric}: {scores_tensor.mean():.3f} ± {scores_tensor.std():.3f}")
+        else:
+            # For single concept, don't show std
+            print(f"  Detect percentile: {detect_tensor.mean():.3f}")
+            print(f"  Invert percentile: {invert_tensor.mean():.3f}")
+            print(f"  {optimization_metric}: {scores_tensor.mean():.3f}")
+        print(f"  Saved to: {inversion_file}")
     
     return optimal_thresholds
 
 
-def detect_then_invert_with_optimal_thresholds(act_metrics, concepts, gt_samples_per_concept, 
-                                              gt_samples_per_concept_test, device, dataset_name, 
-                                              model_input_size, con_label, optimization_metric='f1',
-                                              all_object_patches=None, patch_size=14):
+def detect_then_invert_with_optimal_thresholds(
+    act_loader: Union[MatchedConceptActivationLoader, ChunkedActivationLoader],
+    concepts: Dict,
+    gt_samples_per_concept: Dict,
+    gt_samples_per_concept_test: Dict,
+    device: str,
+    dataset_name: str,
+    model_input_size: Tuple,
+    con_label: str,
+    optimization_metric: str = 'f1',
+    embedding_loader=None
+):
     """
-    Evaluate on TEST set using per-concept optimal detect/invert thresholds found on calibration set.
-    """
-    # Load optimal thresholds
-    threshold_file = f'Detect_Invert_Thresholds/{dataset_name}/optimal_{optimization_metric}_{con_label}.pt'
-    try:
-        optimal_thresholds = torch.load(threshold_file)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Optimal thresholds not found: {threshold_file}. Run calibration optimization first.")
+    Memory-efficient version using activation loader.
+    Evaluate detection and inversion with optimal thresholds on TEST set.
+    Must be run AFTER find_optimal_detect_invert_thresholds.
     
-    # We now use actual threshold values saved in optimal_thresholds, not percentiles
-    # Get test split indices
-    split_df = get_patch_split_df(dataset_name, patch_size=patch_size, model_input_size=model_input_size)
-    test_indices = torch.tensor(split_df.index[split_df == 'test'].tolist())
+    Args:
+        act_loader: Activation loader
+        concepts: Concept vectors
+        gt_samples_per_concept: Ground truth samples per concept
+        gt_samples_per_concept_test: Test set ground truth samples
+        device: Compute device
+        dataset_name: Dataset name
+        model_input_size: Model input dimensions
+        con_label: Concept label
+        optimization_metric: Metric used for optimization
+        embedding_loader: ChunkedEmbeddingLoader instance for computing cosine similarities
+    """
+    # Load optimal inversion thresholds
+    optimal_path = f'Best_Inversion_Percentiles_Cal/{dataset_name}/best_inversion_percentiles_{con_label}.pt'
+    optimal_inversion_thresholds = torch.load(optimal_path, weights_only=False)
+    
+    # Load detection thresholds  
+    detection_path = f'Best_Detection_Percentiles_Cal/{dataset_name}/best_percentiles_{con_label}.pt'
+    optimal_detection_thresholds = torch.load(detection_path, weights_only=False)
+    
+    # Get unique percentile combinations
+    unique_combinations = set()
+    for concept in optimal_inversion_thresholds.keys():
+        if concept in optimal_detection_thresholds:
+            detect_perc = optimal_detection_thresholds[concept]['best_percentile']
+            invert_perc = optimal_inversion_thresholds[concept]['best_percentile']
+            unique_combinations.add((detect_perc, invert_perc))
+    
+    print(f"Found {len(unique_combinations)} unique threshold combinations to evaluate")
+    
+    # MATCH CALIBRATION APPROACH: Use global indices for test set too
+    from utils.general_utils import get_split_df
+    split_df = get_split_df(dataset_name)
+    
+    # For text datasets, get test sentence indices
     if model_input_size[0] == 'text':
-        relevant_indices = test_indices
+        token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
+        token_counts_per_sentence = torch.load(token_counts_file, weights_only=False)
+        test_sentence_indices = [i for i in range(len(token_counts_per_sentence)) if split_df.get(i) == 'test']
+        test_indices = torch.tensor(test_sentence_indices)
+        
+        # GLOBAL INDICES APPROACH: Use ALL dataset token indices, filter by split in ground truth
+        loader_info = act_loader.get_activation_info() if hasattr(act_loader, 'get_activation_info') else act_loader.get_info()
+        total_tokens = loader_info['total_samples']
+        relevant_indices = torch.arange(total_tokens)  # Use all token indices
+        
     else:
+        # For image datasets, use patch-based approach  
+        split_df_patch = get_patch_split_df(dataset_name, model_input_size=model_input_size, patch_size=14)
+        test_indices = torch.tensor(split_df_patch.index[split_df_patch == 'test'].tolist())
         relevant_indices = filter_patches_by_image_presence(test_indices, dataset_name, model_input_size)
-
-    # Get ground truth labels from test set - USE TEST GT
-    all_concept_labels = create_binary_labels(len(split_df), gt_samples_per_concept_test)
     
-    # Prepare results storage
-    fp_counts = {}
-    fn_counts = {}
-    tp_counts = {}
-    tn_counts = {}
+    # Get ground truth labels from test set
+    loader_info = act_loader.get_activation_info() if hasattr(act_loader, 'get_activation_info') else act_loader.get_info()
+    total_samples = loader_info['total_samples']
     
-    # Process each concept with its optimal thresholds
-    print(f"Evaluating {len(optimal_thresholds)} concepts on test set with optimal thresholds...")
+    # GLOBAL INDICES: Keep ground truth in global indices, no remapping!
+    if model_input_size[0] == 'text':
+        filtered_gt = {}
+        for concept, indices in gt_samples_per_concept_test.items():
+            # Keep original global indices - no remapping needed!
+            filtered_gt[concept] = set(indices)
+        all_concept_labels = create_binary_labels(total_samples, filtered_gt)
+    else:
+        all_concept_labels = create_binary_labels(total_samples, gt_samples_per_concept_test)
     
-    # Check for concepts without optimal thresholds
-    all_concepts = set(str(c) for c in concepts.keys())
-    missing_concepts = all_concepts - set(optimal_thresholds.keys())
-    if missing_concepts:
-        print(f"Warning: These concepts have no optimal thresholds (likely all F1=0): {missing_concepts}")
+    # Process each unique combination
+    all_results = {}
     
-    for concept_str, threshold_info in tqdm(optimal_thresholds.items(), desc="Evaluating concepts"):
-        # Skip if concept not in current concepts
-        if concept_str not in [str(c) for c in concepts.keys()]:
-            continue
-            
-        # Use the actual threshold values that were saved
-        detect_threshold = threshold_info['detect_threshold']
-        invert_threshold = threshold_info['invert_threshold']
-        
-        if detect_threshold is None or invert_threshold is None:
-            print(f"Warning: Skipping {concept_str} due to missing thresholds")
-            continue
-        
-        # Get detection mask
-        detected_patches = get_patch_detection_tensor(
-            act_metrics, {concept_str: detect_threshold}, model_input_size, dataset_name
-        )[concept_str]
-        
-        # Get ground truth and activations for relevant indices
-        concept_labels = all_concept_labels[concept_str]
-        relevant_labels = concept_labels[relevant_indices.tolist()]
-        
-        concept_acts = torch.tensor(
-            act_metrics[concept_str].loc[relevant_indices.tolist()].values, device=device
-        )
-        
-        detected_mask = torch.tensor(
-            detected_patches.loc[relevant_indices.tolist()].values, device=device
-        )
-        
-        # Compute predictions: detected AND above invert threshold
-        predictions = detected_mask & (concept_acts >= invert_threshold[0])
-        
-        # Ground truth mask
-        gt_mask = (relevant_labels == 1)
-        if isinstance(gt_mask, torch.Tensor):
-            gt_mask = gt_mask.to(device)
+    for detect_per, invert_per in tqdm(unique_combinations, desc="Evaluating optimal thresholds"):
+        # Load thresholds for this combination
+        if 'kmeans' not in con_label:
+            all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
         else:
-            gt_mask = torch.tensor(gt_mask == 1, device=device)
+            # Handle kmeans thresholds
+            raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
+            alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
+            
+            all_thresholds = {}
+            for percentile, thresholds_dict in raw_thresholds.items():
+                matched_thresholds = {}
+                for concept, info in alignment_results.items():
+                    cluster_id = info['best_cluster']
+                    key = (concept, cluster_id)
+                    if key in thresholds_dict:
+                        matched_thresholds[concept] = thresholds_dict[key]
+                all_thresholds[percentile] = matched_thresholds
         
-        # Compute confusion matrix
-        tp = torch.sum(predictions & gt_mask).item()
-        fn = torch.sum((~predictions) & gt_mask).item()
-        fp = torch.sum(predictions & (~gt_mask)).item()
-        tn = torch.sum((~predictions) & (~gt_mask)).item()
+        detect_thresholds = all_thresholds[detect_per]
+        invert_thresholds = all_thresholds[invert_per]
+        
+        # Get concepts that use this combination
+        concepts_for_combo = [c for c in optimal_inversion_thresholds.keys()
+                             if c in optimal_detection_thresholds and 
+                             optimal_detection_thresholds[c]['best_percentile'] == detect_per and
+                             optimal_inversion_thresholds[c]['best_percentile'] == invert_per]
+        
+        # Filter thresholds and concepts
+        filtered_detect = {c: detect_thresholds[c] for c in concepts_for_combo if c in detect_thresholds}
+        filtered_invert = {c: invert_thresholds[c] for c in concepts_for_combo if c in invert_thresholds}
+        filtered_concepts = {c: concepts[c] for c in concepts_for_combo if c in concepts}
+        
+        if not filtered_detect:
+            continue
+        
+        # Compute metrics using loader - SPECIFY TEST SPLIT
+        results = detect_then_invert_metrics(
+            detect_per, [invert_per],
+            act_loader, filtered_concepts,
+            gt_samples_per_concept, gt_samples_per_concept_test,
+            relevant_indices, all_concept_labels,
+            device, dataset_name, model_input_size, con_label,
+            patch_size=14,
+            embedding_loader=embedding_loader,
+            split='test'
+        )
         
         # Store results
-        tp_counts[concept_str] = tp
-        fn_counts[concept_str] = fn
-        fp_counts[concept_str] = fp
-        tn_counts[concept_str] = tn
+        for concept in concepts_for_combo:
+            if concept in results.get(invert_per, {}):
+                all_results[concept] = results[invert_per][concept]
+                all_results[concept]['detect_percentile'] = detect_per
+                all_results[concept]['invert_percentile'] = invert_per
     
-    # Compute metrics
-    metrics_df = compute_concept_metrics(
-        fp_counts, fn_counts, tp_counts, tn_counts,
-        list(optimal_thresholds.keys()), dataset_name, f'{con_label}_optimal_test'
-    )
+    # Save final results
+    save_path = f'Quant_Results/{dataset_name}/optimal_test_results_{con_label}_{optimization_metric}.pt'
+    torch.save(all_results, save_path)
     
-    # Add threshold information to results (only if concept column exists)
-    if 'concept' in metrics_df.columns:
-        for concept_str, threshold_info in optimal_thresholds.items():
-            if concept_str in metrics_df['concept'].values:
-                idx = metrics_df[metrics_df['concept'] == concept_str].index[0]
-                metrics_df.loc[idx, 'detect_percentile'] = threshold_info['detect_percentile']
-                metrics_df.loc[idx, 'invert_percentile'] = threshold_info['invert_percentile']
-                metrics_df.loc[idx, f'cal_{optimization_metric}'] = threshold_info[f'best_{optimization_metric}']
-    
-    return metrics_df
+    # Print summary statistics
+    if all_results:
+        avg_precision = np.mean([r['precision'] for r in all_results.values()])
+        avg_recall = np.mean([r['recall'] for r in all_results.values()])
+        avg_f1 = np.mean([r['f1'] for r in all_results.values()])
+        
+        print(f"\nTest Set Results with Optimal Thresholds:")
+        print(f"Average Precision: {avg_precision:.4f}")
+        print(f"Average Recall: {avg_recall:.4f}")
+        print(f"Average F1: {avg_f1:.4f}")
+        print(f"Results saved to: {save_path}")
+    else:
+        print("No results computed")
 
     
 def detect_then_invert_performance_heatmap(metric_name, gt_samples_per_concept_test, dataset_name, con_label, 
@@ -1655,13 +1883,20 @@ def compute_stats_from_counts(tp_count, fp_count, tn_count, fn_count):
     return metrics_df
 
 
-def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, dataset_name, con_label, invert_percentile=None, just_obj=False, baseline_type=None, detect_percentile=None):
+def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, dataset_name, con_label, invert_percentile=None, just_obj=False, baseline_type=None, detect_percentile=None, save_label=None):
     metrics_df = compute_stats_from_counts(tp_count, fp_count, tn_count, fn_count)
+    
+    # Use save_label for file naming if provided, otherwise use con_label
+    if save_label is None:
+        save_label = con_label
+    
+    # Add concept column with the keys from the count dictionaries
+    metrics_df['concept'] = list(tp_count.keys())
     
     # Map cluster IDs to concept names for unsupervised methods
     if 'kmeans' in con_label:
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
-        cluster_to_concept = {info['best_cluster']: concept_name for concept_name, info in alignment_results.items()}
+        cluster_to_concept = {str(info['best_cluster']): concept_name for concept_name, info in alignment_results.items()}
         metrics_df['concept'] = metrics_df['concept'].map(lambda x: cluster_to_concept.get(str(x), str(x)))
     
     # Save the DataFrame as a CSV file
@@ -1670,25 +1905,25 @@ def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, da
             if 'inversion_' in baseline_type and invert_percentile is not None:
                 save_path = f'Quant_Results/{dataset_name}/{baseline_type}_justobj_per_{invert_percentile*100}.csv'
             else:
-                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_justobj_{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_justobj_{save_label}.csv'
         else:
             if detect_percentile is not None:
-                save_path = f'Quant_Results/{dataset_name}/justobj_detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/justobj_detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{save_label}.csv'
             else:
-                save_path = f'Quant_Results/{dataset_name}/justobj_per_{invert_percentile*100}_{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/justobj_per_{invert_percentile*100}_{save_label}.csv'
     else:
         if baseline_type:
             if 'inversion_' in baseline_type and invert_percentile is not None:
                 save_path = f'Quant_Results/{dataset_name}/{baseline_type}_per_{invert_percentile*100}.csv'
             else:
-                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/{baseline_type}_{save_label}.csv'
         else:
             if detect_percentile is not None and invert_percentile is not None:
-                save_path = f'Quant_Results/{dataset_name}/detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/detectfirst_{detect_percentile*100}_per_{invert_percentile*100}_{save_label}.csv'
             elif invert_percentile is not None:
-                save_path = f'Quant_Results/{dataset_name}/per_{invert_percentile*100}_{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/per_{invert_percentile*100}_{save_label}.csv'
             else:
-                save_path = f'Quant_Results/{dataset_name}/{con_label}.csv'
+                save_path = f'Quant_Results/{dataset_name}/{save_label}.csv'
 
 
     metrics_df.to_csv(save_path, index=False)
@@ -2196,21 +2431,31 @@ def concept_heatmap_random_samples(concept_embeddings, con_label, num_samples=15
                    dataset_name=dataset_name, save_label=save_label)
     
 
-def compute_cossim_hist_stats(gt_samples_per_concept, cos_sims, dataset_name, percentile, sample_type, model_input_size, con_label, patch_size=14, all_object_patches=None):
+def compute_cossim_hist_stats(gt_samples_per_concept, acts_loader, dataset_name, percentile, sample_type, model_input_size, con_label, patch_size=14, all_object_patches=None, concepts_to_process=None):
     """
     Computes in-sample and out-of-sample cosine similarity statistics for each concept, separated by train and test splits.
 
     Args:
         concept_thresholds (dict): Dictionary mapping concepts to (threshold, random_threshold).
         gt_samples_per_concept (dict): Dictionary mapping concepts to sets of true concept patch indices.
-        cos_sims (pd.DataFrame): DataFrame where each column is a concept and rows are patch cosine similarities.
+        acts_loader: ChunkedActivationLoader instance or DataFrame with activations.
         dataset_name (str): The name of the dataset, used to load the correct metadata file.
         percentile (float): Percentile of in-sample patches to compute the threshold.
         all_object_patches (set, optional): Set of patch indices to consider. If provided, only these patches are considered.
+        concepts_to_process (list, optional): List of specific concepts to process. If None, processes all concepts.
 
     Returns:
         dict: A dictionary with per-concept cosine similarity stats, separated by train and test splits.
     """
+    # Handle both ChunkedActivationLoader and DataFrame inputs
+    if hasattr(acts_loader, 'load_full_dataframe'):
+        # For ChunkedActivationLoader, we'll process in chunks to save memory
+        is_chunked_loader = True
+    else:
+        # Assume it's already a DataFrame
+        is_chunked_loader = False
+        cos_sims = acts_loader
+    
     if sample_type == 'patch':
         split_df = get_patch_split_df(dataset_name, patch_size=patch_size, model_input_size=model_input_size)
     else:
@@ -2220,42 +2465,104 @@ def compute_cossim_hist_stats(gt_samples_per_concept, cos_sims, dataset_name, pe
     test_mask = split_df != 'train'
 
     stats = {'train': {}, 'test': {}}
-
-    # Loop over each concept; vectorized operations occur per concept
-    for concept, concept_indices in tqdm(gt_samples_per_concept.items()):
+    
+    # Filter concepts if specified
+    if concepts_to_process is not None:
+        # Convert to set for faster lookup
+        concepts_to_process = set(str(c) for c in concepts_to_process)
+        # Filter gt_samples_per_concept to only include requested concepts
+        filtered_gt_samples = {k: v for k, v in gt_samples_per_concept.items() 
+                             if str(k) in concepts_to_process}
+    else:
+        filtered_gt_samples = gt_samples_per_concept
+    
+    # Pre-process all concept indices
+    processed_concept_indices = {}
+    for concept, concept_indices in filtered_gt_samples.items():
         concept = str(concept)
         concept_indices = set(concept_indices)
         
-        #filter patches that are irrelevant given the preprocessing scheme
+        # Filter patches that are irrelevant given the preprocessing scheme
         concept_indices = set(filter_patches_by_image_presence(concept_indices, dataset_name, model_input_size).tolist())
         
         # Apply object patches filter if provided
         if all_object_patches is not None:
             concept_indices &= all_object_patches
         
-        # Create a boolean mask for samples belonging to this concept.
-        in_gt_mask = cos_sims.index.to_series().isin(concept_indices)
-        out_gt_mask = cos_sims.index.to_series().isin(all_object_patches - concept_indices) if all_object_patches is not None else ~in_gt_mask
-
-        # Get the cosine similarity column for this concept.
-        cos_vals = cos_sims[concept]
-
-        # Vectorized extraction of cosine similarity values for each combination.
-        in_concept_sims_train = cos_vals[train_mask & in_gt_mask].tolist()
-        in_concept_sims_test = cos_vals[test_mask & in_gt_mask].tolist()
-        out_concept_sims_train = cos_vals[train_mask & out_gt_mask].tolist()
-        out_concept_sims_test = cos_vals[test_mask & out_gt_mask].tolist()
-
-        # Store results for train and test splits.
-        stats['train'][concept] = {
-            'in_concept_sims': in_concept_sims_train,
-            'out_concept_sims': out_concept_sims_train
-        }
-        stats['test'][concept] = {
-            'in_concept_sims': in_concept_sims_test,
-            'out_concept_sims': out_concept_sims_test
-        }
+        processed_concept_indices[concept] = concept_indices
+    
+    # Initialize storage
+    for concept in processed_concept_indices:
+        stats['train'][concept] = {'in_concept_sims': [], 'out_concept_sims': []}
+        stats['test'][concept] = {'in_concept_sims': [], 'out_concept_sims': []}
+    
+    if is_chunked_loader:
+        # Process all concepts in one pass through chunks
+        chunk_size = 50000
+        total_samples = acts_loader.total_samples
         
+        
+        for start_idx in tqdm(range(0, total_samples, chunk_size), desc="Processing chunks"):
+            end_idx = min(start_idx + chunk_size, total_samples)
+            
+            # Load chunk once
+            chunk_df = acts_loader.load_chunk_range(start_idx, end_idx)
+            
+            # Get indices and masks for this chunk
+            chunk_indices = list(range(start_idx, end_idx))
+            chunk_train_mask = train_mask.iloc[start_idx:end_idx].reset_index(drop=True)
+            chunk_test_mask = test_mask.iloc[start_idx:end_idx].reset_index(drop=True)
+            
+            # Process each concept for this chunk
+            for concept, concept_indices in processed_concept_indices.items():
+                if concept not in chunk_df.columns:
+                    continue
+                
+                # Create masks for this concept
+                chunk_in_gt_mask = pd.Series(chunk_indices).isin(concept_indices)
+                if all_object_patches is not None:
+                    chunk_out_gt_mask = pd.Series(chunk_indices).isin(all_object_patches - concept_indices)
+                else:
+                    chunk_out_gt_mask = ~chunk_in_gt_mask
+                
+                # Get cosine similarities
+                cos_vals = chunk_df[concept]
+                
+                # Extract and store values
+                train_in = cos_vals[chunk_train_mask & chunk_in_gt_mask].tolist()
+                test_in = cos_vals[chunk_test_mask & chunk_in_gt_mask].tolist()
+                train_out = cos_vals[chunk_train_mask & chunk_out_gt_mask].tolist()
+                test_out = cos_vals[chunk_test_mask & chunk_out_gt_mask].tolist()
+                
+                stats['train'][concept]['in_concept_sims'].extend(train_in)
+                stats['test'][concept]['in_concept_sims'].extend(test_in)
+                stats['train'][concept]['out_concept_sims'].extend(train_out)
+                stats['test'][concept]['out_concept_sims'].extend(test_out)
+                
+            
+            # Clear chunk from memory
+            del chunk_df
+            gc.collect()
+    
+    else:
+        # Original non-chunked logic
+        for concept, concept_indices in tqdm(processed_concept_indices.items(), desc="Processing concepts"):
+            # Create masks
+            in_gt_mask = cos_sims.index.to_series().isin(concept_indices)
+            if all_object_patches is not None:
+                out_gt_mask = cos_sims.index.to_series().isin(all_object_patches - concept_indices)
+            else:
+                out_gt_mask = ~in_gt_mask
+            
+            # Get cosine similarities
+            cos_vals = cos_sims[concept]
+            
+            # Extract values
+            stats['train'][concept]['in_concept_sims'] = cos_vals[train_mask & in_gt_mask].tolist()
+            stats['test'][concept]['in_concept_sims'] = cos_vals[test_mask & in_gt_mask].tolist()
+            stats['train'][concept]['out_concept_sims'] = cos_vals[train_mask & out_gt_mask].tolist()
+            stats['test'][concept]['out_concept_sims'] = cos_vals[test_mask & out_gt_mask].tolist()
+    
     if all_object_patches is not None:
         torch.save(stats, f'Hist_Stats/{dataset_name}/histstats_justobj_{con_label}.pt')
     else:
@@ -2363,6 +2670,149 @@ def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, pl
     
 ### tools for comparing image activations using different patch thresholds   
 
+def find_activated_images_bypatch(loader, curr_thresholds, model_input_size, dataset_name, patch_size=14):
+    """
+    Computes per-image activations by max-pooling over patches using chunked data.
+    Memory-efficient version that processes one split at a time.
+    """
+    from utils.memory_management_utils import ChunkedActivationLoader
+    
+    split_df = get_split_df(dataset_name)
+    patches_per_image = (model_input_size[0] // patch_size) ** 2
+    
+    # Initialize result dictionaries
+    activated_images_train = defaultdict(set)
+    activated_images_test = defaultdict(set)
+    activated_images_cal = defaultdict(set)
+    
+    # Get concepts from loader
+    info = loader.get_activation_info()
+    concepts = info['concept_names']
+    
+    # Process thresholds
+    thresholds = {c: curr_thresholds[c][0] for c in curr_thresholds}
+    threshold_tensor = torch.tensor([thresholds.get(c, float('inf')) for c in concepts])
+    
+    # Process each split separately to save memory
+    for split_name, activated_dict in [('train', activated_images_train), 
+                                       ('test', activated_images_test), 
+                                       ('cal', activated_images_cal)]:
+        
+        # Load only the data for this split
+        split_tensor = loader.load_split_tensor(split_name, dataset_name, model_input_size, patch_size)
+        
+        # Get the indices for this split
+        split_indices = split_df[split_df == split_name].index.tolist()
+        num_split_images = len(split_indices)
+        
+        if num_split_images == 0:
+            continue
+        
+        # Reshape to image-level max activations
+        reshaped_sims = split_tensor.reshape(num_split_images, patches_per_image, -1)
+        max_activations = torch.max(reshaped_sims, dim=1)[0]  # [num_split_images, n_concepts]
+        
+        # Ensure threshold tensor is on same device as activations
+        if threshold_tensor.device != max_activations.device:
+            threshold_tensor = threshold_tensor.to(max_activations.device)
+        
+        # Thresholding
+        activated = max_activations >= threshold_tensor  # [num_split_images, num_concepts]
+        
+        # Process each image in this split
+        for local_img_idx in range(num_split_images):
+            # Find activated concepts for this image
+            activated_concepts = torch.where(activated[local_img_idx])[0]
+            
+            if len(activated_concepts) > 0:
+                global_img_idx = split_indices[local_img_idx]
+                
+                for concept_idx in activated_concepts:
+                    concept = concepts[concept_idx]
+                    activated_dict[concept].add(global_img_idx)
+        
+        # Clear memory for this split
+        del split_tensor, reshaped_sims, max_activations, activated
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    return activated_images_train, activated_images_test, activated_images_cal
+
+
+def find_activated_images_byimage(loader, curr_thresholds, model_input_size, dataset_name):
+    """
+    Finds activated images for cls-level embeddings using chunked data.
+    Memory-efficient version that processes one split at a time.
+    """
+    from utils.memory_management_utils import ChunkedActivationLoader
+    
+    split_df = get_split_df(dataset_name)
+    info = loader.get_activation_info()
+    concepts = info['concept_names']
+    
+    # Process thresholds
+    thresholds = {c: curr_thresholds[c][0] for c in curr_thresholds}
+    threshold_tensor = torch.tensor([thresholds.get(c, float('inf')) for c in concepts])
+    
+    # Initialize result dictionaries
+    activated_images_train = defaultdict(set)
+    activated_images_test = defaultdict(set)
+    activated_images_cal = defaultdict(set)
+    
+    # Process each split separately to save memory
+    for split_name, activated_dict in [('train', activated_images_train), 
+                                       ('test', activated_images_test), 
+                                       ('cal', activated_images_cal)]:
+        
+        # Load only the data for this split
+        split_tensor = loader.load_split_tensor(split_name, dataset_name, model_input_size)
+        
+        # Get the indices for this split
+        split_indices = split_df[split_df == split_name].index.tolist()
+        
+        if len(split_indices) == 0:
+            continue
+        
+        # Ensure threshold tensor is on same device as split tensor
+        if threshold_tensor.device != split_tensor.device:
+            threshold_tensor = threshold_tensor.to(split_tensor.device)
+        
+        # Apply thresholds
+        activated = split_tensor >= threshold_tensor
+        
+        # Process each image in this split
+        for local_idx in range(len(split_tensor)):
+            # Find activated concepts
+            activated_concepts = torch.where(activated[local_idx])[0]
+            
+            if len(activated_concepts) > 0:
+                global_idx = split_indices[local_idx]
+                
+                for concept_idx in activated_concepts:
+                    concept = concepts[concept_idx]
+                    activated_dict[concept].add(global_idx)
+        
+        # Clear memory for this split
+        del split_tensor, activated
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    return activated_images_train, activated_images_test, activated_images_cal
+
+
+def find_activated_sentences_bytoken(loader, curr_thresholds, model_input_size, dataset_name):
+    """
+    Finds activated sentences by token using chunked data.
+    TODO: Implement chunked version for text data
+    """
+    # For now, fall back to loading all data
+    # This would need a proper implementation based on how text tokens are organized
+    acts_df = loader.load_full_dataframe()
+    return find_activated_sentences_bytoken(acts_df, curr_thresholds, model_input_size, dataset_name)
+
+
 # def find_activated_images_bypatch(cos_sims, curr_thresholds, model_input_size, dataset_name, patch_size=14):
 #     """Vectorized version using torch operations (maybe could take out padding from consideration)"""
 #     split_df = get_split_df(dataset_name)
@@ -2399,128 +2849,11 @@ def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, pl
         
 #     return activated_images_train, activated_images_test
 
-def find_activated_images_bypatch(cos_sims, curr_thresholds, model_input_size, dataset_name, patch_size=14):
-    """
-    Computes per-image activations by max-pooling over patches.
-    Filters out irrelevant padded image indices using relevant_indices.
-    """
-    split_df = get_split_df(dataset_name)
-
-    patches_per_image = (model_input_size[0] // patch_size) ** 2
-    total_patches = len(cos_sims)
-    num_images = total_patches // patches_per_image
-
-    # === Filter: valid indices only
-    relevant_indices = set(
-        filter_patches_by_image_presence(cos_sims.index, dataset_name, model_input_size).tolist()
-    )
-
-    # Convert similarities and thresholds - handle missing concepts
-    thresholds = {c: curr_thresholds[c][0] for c in curr_thresholds}
-    cos_sims_tensor = torch.tensor(cos_sims.values)
-    threshold_tensor = torch.tensor([thresholds[c] if c in thresholds else float('inf') for c in cos_sims.columns])  # [num_concepts]
-
-    # Reshape: [num_images, patches_per_image, num_concepts]
-    reshaped_sims = cos_sims_tensor.reshape(num_images, patches_per_image, -1)
-
-    # Max over patches → [num_images, num_concepts]
-    max_activations = torch.max(reshaped_sims, dim=1)[0]
-
-    # Thresholding
-    activated = max_activations >= threshold_tensor  # [num_images, num_concepts]
-
-    # Get train/test/cal split labels for each image index
-    train_mask = torch.tensor([
-        (i in relevant_indices) and (split_df.get(i) == 'train') for i in range(num_images)
-    ])
-    test_mask = torch.tensor([
-        (i in relevant_indices) and (split_df.get(i) == 'test') for i in range(num_images)
-    ])
-    cal_mask = torch.tensor([
-        (i in relevant_indices) and (split_df.get(i) == 'cal') for i in range(num_images)
-    ])
-
-    activated_images_train = defaultdict(set)
-    activated_images_test = defaultdict(set)
-    activated_images_cal = defaultdict(set)
-
-    for i, concept in enumerate(cos_sims.columns):
-        train_indices = torch.where(activated[:, i] & train_mask)[0].tolist()
-        test_indices = torch.where(activated[:, i] & test_mask)[0].tolist()
-        cal_indices = torch.where(activated[:, i] & cal_mask)[0].tolist()
-        activated_images_train[concept].update(train_indices)
-        activated_images_test[concept].update(test_indices)
-        activated_images_cal[concept].update(cal_indices)
-
-    return activated_images_train, activated_images_test, activated_images_cal
 
 
 
-def find_activated_images_byimage(cos_sims, curr_thresholds, model_input_size=None, dataset_name=None):
-    """Vectorized version using torch operations"""
-    split_df = get_split_df(dataset_name)
-    
-    # Convert to tensors
-    thresholds = {c: curr_thresholds[c][0] for c in curr_thresholds}
-    cos_sims_tensor = torch.tensor(cos_sims.values)
-    threshold_tensor = torch.tensor([thresholds[c] for c in cos_sims.columns])
-    
-    # Compare with thresholds
-    activated = cos_sims_tensor >= threshold_tensor.unsqueeze(0)
-    
-    # Split by train/test
-    train_mask = torch.tensor([split_df[i] == 'train' for i in cos_sims.index])
-    test_mask = torch.tensor([split_df[i] == 'test' for i in cos_sims.index])
-    
-    activated_images_train = defaultdict(set)
-    activated_images_test = defaultdict(set)
-    
-    for i, concept in enumerate(cos_sims.columns):
-        train_indices = torch.where(activated[:, i] & train_mask)[0].tolist()
-        test_indices = torch.where(activated[:, i] & test_mask)[0].tolist()
-        activated_images_train[concept].update(train_indices)
-        activated_images_test[concept].update(test_indices)
-        
-    return activated_images_train, activated_images_test
 
 
-def find_activated_sentences_bytoken(act_metrics, curr_thresholds, model_input_size, dataset_name):
-    """Optimized version using torch operations"""
-    split_df = get_split_df(dataset_name)
-    token_counts_per_sentence = torch.load(f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt', weights_only=False)  # List[List[int]]
-    
-    # Each inner list gives token counts per word → sum across to get total tokens per sentence
-    token_counts_flat = torch.tensor([sum(x) for x in token_counts_per_sentence])
-    sentence_starts = torch.cat([torch.tensor([0]), token_counts_flat.cumsum(0)[:-1]])
-    sentence_ends = token_counts_flat.cumsum(0)
-    
-    # Convert activation metrics and thresholds
-    metrics_tensor = torch.tensor(act_metrics.values)
-    threshold_tensor = torch.tensor([curr_thresholds[c][0] for c in act_metrics.columns], dtype=metrics_tensor.dtype)
-    
-    # Compute max activations per sentence (vectorized with list comprehension)
-    max_activations = torch.stack([
-        metrics_tensor[start:end].amax(dim=0) for start, end in zip(sentence_starts, sentence_ends)
-    ])
-    
-    # Compare with thresholds
-    activated = max_activations >= threshold_tensor
-    
-    # Convert split to boolean masks
-    split_array = split_df.values if isinstance(split_df, pd.Series) else split_df
-    train_mask = (split_array == "train")
-    test_mask = (split_array == "test")
-    
-    activated_sentences_train = defaultdict(set)
-    activated_sentences_test = defaultdict(set)
-    
-    for i, concept in enumerate(act_metrics.columns):
-        train_indices = torch.where(activated[:, i] & torch.tensor(train_mask))[0].tolist()
-        test_indices = torch.where(activated[:, i] & torch.tensor(test_mask))[0].tolist()
-        activated_sentences_train[concept].update(train_indices)
-        activated_sentences_test[concept].update(test_indices)
-
-    return activated_sentences_train, activated_sentences_test
 
 
 def get_patch_detection_tensor(act_metrics, detect_thresholds, model_input_size, dataset_name, patch_size=14):
@@ -2536,9 +2869,8 @@ def get_patch_detection_tensor(act_metrics, detect_thresholds, model_input_size,
     
     # Get activated samples using optimized functions
     if model_input_size[0] == 'text':
-        detected_samples_train, detected_samples_test = find_activated_sentences_bytoken(
+        detected_samples_train, detected_samples_test, detected_samples_cal = find_activated_sentences_bytoken(
             act_metrics, detect_thresholds, model_input_size, dataset_name)
-        detected_samples_cal = {}  # No cal support for text yet
     else:
         detected_samples_train, detected_samples_test, detected_samples_cal = find_activated_images_bypatch(
             act_metrics, detect_thresholds, model_input_size, dataset_name)
@@ -2565,19 +2897,20 @@ def get_patch_detection_tensor(act_metrics, detect_thresholds, model_input_size,
 
 
 
-def compute_detection_metrics_for_per(per, gt_images_per_concept_test, 
-                                      activated_images_test, 
-                                      dataset_name, con_label):
+def compute_detection_metrics_for_per(per, gt_images_per_concept_split, 
+                                      activated_images_split, 
+                                      dataset_name, con_label, split='test'):
     """
     Compute detection metrics (TP, FP, TN, FN) for a specific percentile.
     Saves to disk if not already computed.
 
     Args:
         per: Percentile
-        gt_images_per_concept_test: {concept: set of GT image indices}
-        activated_images_test: {concept: set of activated image indices}
+        gt_images_per_concept_split: {concept: set of GT image indices} for the split
+        activated_images_split: {concept: set of activated image indices} for the split
         dataset_name: Dataset name
         con_label: Concept label for saving
+        split: Which split to evaluate ('test', 'cal', 'train')
     Returns:
         metrics_df: pd.DataFrame with TP, FP, TN, FN, F1, TPR, FPR per concept
     """
@@ -2590,13 +2923,13 @@ def compute_detection_metrics_for_per(per, gt_images_per_concept_test,
     
     # Collect all image indices present in the current split
     split_df = get_split_df(dataset_name)
-    all_indices = set(split_df[split_df == 'test'].index)
+    all_indices = set(split_df[split_df == split].index)
 
-    for concept in gt_images_per_concept_test.keys():
-        # gt_images = set(gt_images_per_concept_test[concept]) & set(relevant_indices)
+    for concept in gt_images_per_concept_split.keys():
+        # gt_images = set(gt_images_per_concept_split[concept]) & set(relevant_indices)
         # activated_images = activated_images_test.get(concept, set()) & set(relevant_indices)
-        gt_images = set(gt_images_per_concept_test[concept])
-        activated_images = activated_images_test.get(concept, set())
+        gt_images = set(gt_images_per_concept_split[concept])
+        activated_images = activated_images_split.get(concept, set())
 
         tp = len(gt_images & activated_images)
         fp = len(activated_images - gt_images)
@@ -2614,17 +2947,18 @@ def compute_detection_metrics_for_per(per, gt_images_per_concept_test,
     return metrics_df
 
     
-def compute_detection_metrics_over_percentiles(percentiles, gt_images_per_concept_test, 
-                                               sim_metrics, dataset_name, model_input_size, device, 
+
+def compute_detection_metrics_over_percentiles(percentiles, gt_images_per_concept_split, 
+                                               loader, dataset_name, model_input_size, device, 
                                                con_label, sample_type='patch', patch_size=14):
     """
-    Computes detection metrics over multiple percentiles.
+    Loads activations only once and processes all percentiles.
+    Works for both supervised and unsupervised methods.
 
     Args:
         percentiles: List of percentiles
-        gt_samples_per_concept_test: {concept: patch indices}
-        gt_images_per_concept_test: {concept: image indices}
-        sim_metrics: Cosine similarities
+        gt_images_per_concept_split: {concept: image indices} - can be test or cal set
+        loader: ChunkedActivationLoader
         dataset_name: Dataset name
         model_input_size: (width, height) tuple
         device: CUDA/CPU device
@@ -2634,72 +2968,292 @@ def compute_detection_metrics_over_percentiles(percentiles, gt_images_per_concep
     Returns:
         all_metrics: dict mapping per -> metrics_df
     """
-    # if sample_type == 'patch':
-    #     relevant_indices = set(filter_patches_by_image_presence(sim_metrics.index, dataset_name, model_input_size).tolist())
-    # elif sample_type == 'cls':
-    #     relevant_indices = sim_metrics.index
-        
-    all_metrics = {}
+    from collections import defaultdict
+    import gc
+    from utils.memory_management_utils import ChunkedActivationLoader
+    
+    # Determine split being evaluated
+    if con_label.endswith('_cal'):
+        eval_split = 'cal'
+    else:
+        eval_split = 'test'
+    
+    # Load thresholds for all percentiles
+    threshold_label = con_label.replace('_cal', '') if con_label.endswith('_cal') else con_label
     
     if 'kmeans' not in con_label:
-        all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+        # Supervised methods
+        all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{threshold_label}.pt', weights_only=False)
+        concept_names = list(all_thresholds[percentiles[0]].keys())
     else:
-        # Load files
-        raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
-        alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
-
-        # Collect matched thresholds per percentile
+        # Unsupervised methods - need to handle concept-cluster mapping
+        raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{threshold_label}.pt', weights_only=False)
+        alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{threshold_label}.pt', weights_only=False)
+        
+        # Create matched thresholds
         all_thresholds = {}
-
         for percentile, thresholds_dict in raw_thresholds.items():
             matched_thresholds = {}
-
             for concept, info in alignment_results.items():
                 cluster_id = info['best_cluster']
                 key = (concept, cluster_id)
-
                 if key in thresholds_dict:
-                    matched_thresholds[cluster_id] = thresholds_dict[key]  # keep full (val, nan) tuple
-
+                    matched_thresholds[cluster_id] = thresholds_dict[key]
             all_thresholds[percentile] = matched_thresholds
-
-    for per in tqdm(percentiles):
-        # === Thresholds for current percentile
-        # curr_thresholds = compute_concept_thresholds(
-        #     gt_samples_per_concept_test, sim_metrics, per, 
-        #     device=device, dataset_name=f'{dataset_name}-Cal', con_label=con_label,
-        #     n_vectors=1, n_concepts_to_print=0
-        # )
-        curr_thresholds = all_thresholds[per]
-
-        # === Activation
-        if sample_type == 'patch':
-            if 'text' in model_input_size:
-                _, activated_images_test = find_activated_sentences_bytoken(
-                    sim_metrics, curr_thresholds, model_input_size, dataset_name
-                )
-            else:
-                _, activated_images_test = find_activated_images_bypatch(
-                    sim_metrics, curr_thresholds, model_input_size, dataset_name, patch_size=patch_size
-                )
-        elif sample_type == 'cls':
-            _, activated_images_test = find_activated_images_byimage(
-                sim_metrics, curr_thresholds, model_input_size, dataset_name
-            )
+        
+        concept_names = list(alignment_results.keys())
+    
+    # Get split dataframe
+    split_df = get_split_df(dataset_name)
+    all_indices = set(split_df[split_df == eval_split].index)
+    
+    # Precompute max activations for all images with GPU optimization
+    # print(f"Precomputing max activations for {eval_split} split...")
+    
+    if sample_type == 'patch':
+        # Check if this is a text dataset
+        if isinstance(model_input_size[0], str) and model_input_size[0] == 'text':
+            # For text datasets, load token counts to determine tokens per paragraph
+            token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
+            
+            if not os.path.exists(token_counts_file):
+                raise FileNotFoundError(f"Token counts file not found: {token_counts_file}")
+            
+            token_counts = torch.load(token_counts_file, weights_only=False)
+            
+            # Convert to tokens per sentence/paragraph
+            tokens_per_paragraph = [sum(sent_tokens) if isinstance(sent_tokens, list) else sent_tokens 
+                                  for sent_tokens in token_counts]
+            
+            info = loader.get_activation_info()
+            total_tokens = info['total_samples']
+            num_paragraphs = len(tokens_per_paragraph)
+            num_concepts = info['num_concepts']
+            
+            # For text, we'll use variable-size handling below
+            patches_per_image = None  # Variable for text
+            num_images = num_paragraphs
         else:
-            raise ValueError(f"Unknown sample_type: {sample_type}")
-
-        # === Compute detection metrics
+            # For image datasets, use fixed patch grid
+            patches_per_image = (model_input_size[0] // patch_size) ** 2
+            info = loader.get_activation_info()
+            total_patches = info['total_samples']
+            num_images = total_patches // patches_per_image
+            num_concepts = info['num_concepts']
+        
+        # Check GPU memory availability
+        keep_on_gpu = False
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            required_memory = num_images * num_concepts * 4  # float32
+            
+            if required_memory < available_memory * 0.8:  # Use 80% of available memory
+                # print(f"Allocating {required_memory / 1e9:.2f}GB on GPU")
+                max_activations_all = torch.zeros(num_images, num_concepts, dtype=torch.float32, device=device)
+                keep_on_gpu = True
+            else:
+                # print(f"Not enough GPU memory ({required_memory / 1e9:.2f}GB needed, {available_memory / 1e9:.2f}GB available). Using CPU.")
+                max_activations_all = torch.zeros(num_images, num_concepts, dtype=torch.float32)
+        else:
+            max_activations_all = torch.zeros(num_images, num_concepts, dtype=torch.float32)
+        
+        # Process in chunks with GPU optimization
+        if patches_per_image is not None:
+            # Fixed patch size (image datasets)
+            images_per_chunk = 500
+            for img_start_idx in tqdm(range(0, num_images, images_per_chunk), desc="Loading activations"):
+                img_end_idx = min(img_start_idx + images_per_chunk, num_images)
+                
+                # Calculate patch range
+                patch_start_idx = img_start_idx * patches_per_image
+                patch_end_idx = img_end_idx * patches_per_image
+                
+                # Load chunk and move to GPU if beneficial
+                chunk_tensor = loader.load_chunk_range(patch_start_idx, patch_end_idx)
+                if device == 'cuda' and chunk_tensor.device != device:
+                    chunk_tensor = chunk_tensor.to(device)
+                    
+                num_images_in_chunk = img_end_idx - img_start_idx
+                
+                # Reshape and compute max on GPU if possible
+                reshaped = chunk_tensor.reshape(num_images_in_chunk, patches_per_image, -1)
+                max_acts = torch.max(reshaped, dim=1)[0]
+                
+                # Store results
+                if keep_on_gpu:
+                    max_activations_all[img_start_idx:img_end_idx] = max_acts
+                else:
+                    max_activations_all[img_start_idx:img_end_idx] = max_acts.cpu()
+                
+                # Clean up
+                del chunk_tensor, reshaped, max_acts
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        else:
+            # Variable token size (text datasets)
+            paragraphs_per_chunk = 100
+            
+            # Calculate cumulative token indices
+            cumulative_tokens = [0]
+            for tokens in tokens_per_paragraph:
+                cumulative_tokens.append(cumulative_tokens[-1] + tokens)
+            
+            for para_start_idx in tqdm(range(0, num_paragraphs, paragraphs_per_chunk), desc="Loading activations"):
+                para_end_idx = min(para_start_idx + paragraphs_per_chunk, num_paragraphs)
+                
+                # Calculate token range for this chunk of paragraphs
+                token_start_idx = cumulative_tokens[para_start_idx]
+                token_end_idx = cumulative_tokens[para_end_idx]
+                
+                # Load chunk and move to GPU if beneficial
+                chunk_tensor = loader.load_chunk_range(token_start_idx, token_end_idx)
+                if device == 'cuda' and chunk_tensor.device != device:
+                    chunk_tensor = chunk_tensor.to(device)
+                
+                # Process each paragraph separately due to variable lengths
+                chunk_start = 0
+                for para_idx in range(para_start_idx, para_end_idx):
+                    para_tokens = tokens_per_paragraph[para_idx]
+                    para_acts = chunk_tensor[chunk_start:chunk_start + para_tokens]
+                    
+                    # Compute max activation for this paragraph
+                    max_act = torch.max(para_acts, dim=0)[0]
+                    
+                    # Store results
+                    if keep_on_gpu:
+                        max_activations_all[para_idx] = max_act
+                    else:
+                        max_activations_all[para_idx] = max_act.cpu()
+                    
+                    chunk_start += para_tokens
+                
+                # Clean up
+                del chunk_tensor
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+    else:
+        # For CLS, activations are already at image level
+        # print("Loading image-level activations...")
+        full_tensor = loader.load_full_tensor()
+        
+        # Keep on GPU if memory allows
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            required_memory = full_tensor.numel() * 4  # float32
+            
+            if required_memory < available_memory * 0.8:
+                # print(f"Keeping CLS activations on GPU ({required_memory / 1e9:.2f}GB)")
+                max_activations_all = full_tensor.to(device)
+                keep_on_gpu = True
+            else:
+                # print(f"Using CPU for CLS activations ({required_memory / 1e9:.2f}GB needed)")
+                max_activations_all = full_tensor.cpu()
+                keep_on_gpu = False
+        else:
+            max_activations_all = full_tensor.cpu()
+            keep_on_gpu = False
+            
+        num_images = max_activations_all.shape[0]
+    
+    # print(f"Max activations shape: {max_activations_all.shape}")
+    
+    # Get concept/cluster labels from loader
+    loader_info = loader.get_activation_info() if hasattr(loader, 'get_activation_info') else loader.get_info()
+    
+    if 'kmeans' not in con_label:
+        # For supervised, concept names are column names
+        concept_columns = loader_info['concept_names']
+    else:
+        # For unsupervised, columns are cluster IDs
+        cluster_columns = loader_info['concept_names']
+    
+    # Process each percentile using precomputed activations with GPU optimization
+    all_metrics = {}
+    
+    # Precompute split mask for efficient filtering
+    split_mask = torch.tensor([split_df.iloc[i] == eval_split if i < len(split_df) else False 
+                              for i in range(len(split_df))], dtype=torch.bool)
+    if keep_on_gpu and device == 'cuda':
+        split_mask = split_mask.to(device)
+    
+    for per in tqdm(percentiles, desc="Computing metrics for each percentile"):
+        curr_thresholds = all_thresholds[per]
+        
+        # Find activated images with vectorized operations
+        activated_images_split = defaultdict(set)
+        
+        if 'kmeans' not in con_label:
+            # Supervised: direct concept mapping with vectorized operations
+            for concept, (threshold, _) in curr_thresholds.items():
+                if str(concept) in concept_columns:
+                    concept_idx = concept_columns.index(str(concept))
+                    
+                    # Vectorized activation detection
+                    concept_activations = max_activations_all[:, concept_idx]
+                    activated_mask = concept_activations >= threshold
+                    
+                    # Combine with split mask for efficient filtering
+                    if len(split_mask) > len(activated_mask):
+                        split_mask_truncated = split_mask[:len(activated_mask)]
+                    else:
+                        split_mask_truncated = split_mask
+                        
+                    final_mask = activated_mask & split_mask_truncated
+                    activated_indices = torch.where(final_mask)[0]
+                    
+                    # Convert to set on CPU
+                    if activated_indices.device.type == 'cuda':
+                        activated_indices = activated_indices.cpu()
+                    activated_images_split[concept] = set(activated_indices.tolist())
+                    
+        else:
+            # Unsupervised: vectorized cluster to concept mapping
+            for concept, info in alignment_results.items():
+                cluster_id = str(info['best_cluster'])
+                if cluster_id in curr_thresholds:
+                    threshold, _ = curr_thresholds[cluster_id]
+                    
+                    if cluster_id in cluster_columns:
+                        cluster_idx = cluster_columns.index(cluster_id)
+                        
+                        # Vectorized activation detection
+                        cluster_activations = max_activations_all[:, cluster_idx]
+                        activated_mask = cluster_activations >= threshold
+                        
+                        # Combine with split mask for efficient filtering
+                        if len(split_mask) > len(activated_mask):
+                            split_mask_truncated = split_mask[:len(activated_mask)]
+                        else:
+                            split_mask_truncated = split_mask
+                            
+                        final_mask = activated_mask & split_mask_truncated
+                        activated_indices = torch.where(final_mask)[0]
+                        
+                        # Convert to set on CPU
+                        if activated_indices.device.type == 'cuda':
+                            activated_indices = activated_indices.cpu()
+                        activated_images_split[concept] = set(activated_indices.tolist())
+        
+        # Compute metrics
         metrics_df = compute_detection_metrics_for_per(
-            per, gt_images_per_concept_test, activated_images_test, 
-            dataset_name, con_label
+            per, gt_images_per_concept_split, activated_images_split,
+            dataset_name, con_label, split=eval_split
         )
-
+        
         all_metrics[per] = metrics_df
-
+    
+    # Clean up
+    del max_activations_all
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
     return all_metrics
-    
-    
+
 
 def compute_percentages_per_concept(concepts, activated_images_train, activated_images_test,
                                     gt_images_per_concept_train, gt_images_per_concept_test,
@@ -3819,6 +4373,170 @@ def plot_cooccurrence_detection_iou_over_percentiles(percentiles, concept1, conc
     plt.title(f"Patch Co-occurrence IOU for '{concept1}' and '{concept2}'")
     plt.tight_layout()
     plt.show()
+
+
+def find_best_detection_percentiles_cal(dataset_name, con_label, percentiles, sample_type='patch'):
+    """
+    Find the best percentile threshold for each concept based on calibration set F1 scores.
+    
+    Args:
+        dataset_name: Name of the dataset
+        con_label: Concept label identifier
+        percentiles: List of percentiles to search over
+        sample_type: 'patch' or 'cls' 
+        
+    Returns:
+        dict: Mapping of concept -> (best_percentile, best_f1_score, best_threshold)
+    """
+    import os
+    import ast
+    
+    # Results directory
+    base_dir = f'Quant_Results/{dataset_name}'
+    save_dir = f'Best_Detection_Percentiles_Cal/{dataset_name}'
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Initialize results dictionary
+    best_per_concept = {}
+    
+    # For unsupervised methods, we need to handle (concept, cluster) pairs
+    is_unsupervised = 'kmeans' in con_label or 'sae' in con_label
+    
+    # Load calibration detection metrics for each percentile
+    all_metrics = {}
+    missing_count = 0
+    for per in percentiles:
+        # Look for calibration results
+        # For unsupervised: CSV files, for supervised: PT files
+        if is_unsupervised:
+            cal_metrics_path = f"{base_dir}/detectionmetrics_allpairs_per_{per}_{con_label}_cal.csv"
+            if os.path.exists(cal_metrics_path):
+                metrics_df = pd.read_csv(cal_metrics_path)
+                all_metrics[per] = metrics_df
+            else:
+                missing_count += 1
+        else:
+            # Supervised saves as .pt files
+            cal_metrics_path = f"{base_dir}/detectionmetrics_per_{per}_{con_label}_cal.pt"
+            if os.path.exists(cal_metrics_path):
+                metrics_df = torch.load(cal_metrics_path, weights_only=False)
+                all_metrics[per] = metrics_df
+            else:
+                missing_count += 1
+    
+    if not all_metrics:
+        # Check what files actually exist in the directory
+        import glob
+        if is_unsupervised:
+            pattern = f"{base_dir}/detectionmetrics_allpairs_per_*_{con_label}_cal.csv"
+        else:
+            pattern = f"{base_dir}/detectionmetrics_per_*_{con_label}_cal.pt"
+        
+        existing_files = glob.glob(pattern)
+        
+        raise FileNotFoundError(
+            f"No calibration metrics found for {con_label}.\n"
+            f"Expected pattern: {pattern}\n"
+            f"Found {len(existing_files)} matching files: {existing_files[:3]}..."
+        )
+    
+    # Load thresholds
+    threshold_file = f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt' if is_unsupervised else f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
+    if os.path.exists(threshold_file):
+        all_thresholds = torch.load(threshold_file, weights_only=False)
+    else:
+        print(f"Warning: Threshold file not found: {threshold_file}")
+        all_thresholds = {}
+    
+    # Process each concept
+    if is_unsupervised:
+        # For unsupervised, group by concept from (concept, cluster) pairs
+        concepts_seen = set()
+        for per, metrics_df in all_metrics.items():
+            for idx, row in metrics_df.iterrows():
+                concept, cluster = ast.literal_eval(row['concept'])
+                if concept not in concepts_seen:
+                    concepts_seen.add(concept)
+        
+        # Find best percentile for each concept
+        for concept in concepts_seen:
+            best_f1 = -1
+            best_per = None
+            best_threshold = None
+            best_cluster = None
+            
+            for per, metrics_df in all_metrics.items():
+                # Find all clusters for this concept
+                concept_rows = metrics_df[metrics_df['concept'].apply(lambda x: ast.literal_eval(x)[0] == concept)]
+                
+                for idx, row in concept_rows.iterrows():
+                    _, cluster = ast.literal_eval(row['concept'])
+                    f1 = row['f1']
+                    
+                    if f1 > best_f1:
+                        best_f1 = f1
+                        best_per = per
+                        best_cluster = cluster
+                        # Get threshold
+                        if per in all_thresholds and (concept, str(cluster)) in all_thresholds[per]:
+                            best_threshold = all_thresholds[per][(concept, str(cluster))][0]
+                        else:
+                            best_threshold = None
+            
+            if best_per is not None:
+                best_per_concept[concept] = {
+                    'best_percentile': best_per,
+                    'best_f1': best_f1,
+                    'best_threshold': best_threshold,
+                    'best_cluster': best_cluster
+                }
+    else:
+        # For supervised, process each concept directly
+        for per, metrics_df in all_metrics.items():
+            for idx, row in metrics_df.iterrows():
+                concept = row['concept']
+                f1 = row['f1']
+                
+                if concept not in best_per_concept or f1 > best_per_concept[concept]['best_f1']:
+                    # Get threshold
+                    if per in all_thresholds and concept in all_thresholds[per]:
+                        threshold = all_thresholds[per][concept][0]
+                    else:
+                        threshold = None
+                        
+                    best_per_concept[concept] = {
+                        'best_percentile': per,
+                        'best_f1': f1,
+                        'best_threshold': threshold
+                    }
+    
+    # Save results
+    save_path = os.path.join(save_dir, f'best_percentiles_{con_label}.pt')
+    torch.save(best_per_concept, save_path)
+    
+    # Also save as readable CSV
+    csv_data = []
+    for concept, info in best_per_concept.items():
+        csv_data.append({
+            'concept': concept,
+            'best_percentile': info['best_percentile'],
+            'best_f1': info['best_f1'],
+            'best_threshold': info['best_threshold'],
+            'best_cluster': info.get('best_cluster', 'N/A')
+        })
+    
+    if csv_data:
+        csv_df = pd.DataFrame(csv_data)
+        csv_df = csv_df.sort_values('concept')
+        csv_path = os.path.join(save_dir, f'best_percentiles_{con_label}.csv')
+        csv_df.to_csv(csv_path, index=False)
+        
+        # print(f"Saved best calibration percentiles to {save_path}")
+        # print(f"Summary: {len(best_per_concept)} concepts analyzed")
+        # print(f"Average best percentile: {np.mean([info['best_percentile'] for info in best_per_concept.values()]):.3f}")
+        # print(f"Average best F1: {np.mean([info['best_f1'] for info in best_per_concept.values()]):.3f}")
+    
+    return best_per_concept
     
     
 

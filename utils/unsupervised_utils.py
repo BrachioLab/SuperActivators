@@ -45,7 +45,7 @@ def find_closest_cluster_per_concept(clusters, gt_concepts, dataset_name, con_la
         results[concept] = (cluster_labels[best_idx.item()], round(best_sim.item(), 4))
 
     torch.save(results, f'Unsupervised_Matches/{dataset_name}/{con_label}.pt')
-    print(f"Alignment results saved at Unsupervised_Matches/{dataset_name}/{con_label}.pt :)")
+    # print(f"Alignment results saved at Unsupervised_Matches/{dataset_name}/{con_label}.pt :)")
     return results
 
 
@@ -712,7 +712,7 @@ def get_patch_detection_tensor_all_pairs(act_metrics, detect_thresholds, model_i
 #         activated_images_train[(concept, cluster_label)].update(train_indices)
 #         activated_images_test[(concept, cluster_label)].update(test_indices)
 
-#     return activated_images_train, activated_images_test
+#     return activated_images_train, activated_images_test, activated_images_cal
 
 
 # def find_activated_images_bypatch_per_cluster(cluster_label, concept_list, curr_thresholds, patches_per_image, dataset_name,
@@ -819,7 +819,7 @@ def get_patch_detection_tensor_all_pairs(act_metrics, detect_thresholds, model_i
 
 #         torch.cuda.empty_cache()
 
-#     return activated_images_train, activated_images_test
+#     return activated_images_train, activated_images_test, activated_images_cal
 
 # def load_sims_to_gpu(filepath, cluster_labels, device):
 #     sims = pd.read_csv(filepath, usecols=cluster_labels, engine='pyarrow')
@@ -903,7 +903,7 @@ def get_patch_detection_tensor_all_pairs(act_metrics, detect_thresholds, model_i
 
 #         torch.cuda.empty_cache()
 
-#     return activated_images_train, activated_images_test
+#     return activated_images_train, activated_images_test, activated_images_cal
 
 
 
@@ -933,7 +933,7 @@ def get_patch_detection_tensor_all_pairs(act_metrics, detect_thresholds, model_i
 #             activated_images_train[(concept_name, cluster_label)].update(train_indices)
 #             activated_images_test[(concept_name, cluster_label)].update(test_indices)
 
-#     return activated_images_train, activated_images_test
+#     return activated_images_train, activated_images_test, activated_images_cal
 
 
 # def get_cluster_max_activation(filepath, cluster_label, patches_per_image, num_images, device):
@@ -987,7 +987,7 @@ def get_patch_detection_tensor_all_pairs(act_metrics, detect_thresholds, model_i
 #         activated_images_train[(concept, cluster)].update(train_indices)
 #         activated_images_test[(concept, cluster)].update(test_indices)
 
-#     return activated_images_train, activated_images_test
+#     return activated_images_train, activated_images_test, activated_images_cal
 
 
 # def compute_detection_metrics_over_percentiles_allpairs(percentiles, gt_samples_per_concept_test, 
@@ -1081,36 +1081,32 @@ def get_patch_detection_tensor_all_pairs(act_metrics, detect_thresholds, model_i
 #         metrics.to_csv(save_path, index=False)
 
 
-def compute_concept_thresholds_over_percentiles_all_pairs(cos_sims_df, gt_samples_per_concept_cal, percentiles, device,
+def compute_concept_thresholds_over_percentiles_all_pairs(loader, gt_samples_per_concept_cal, percentiles, device,
                                             dataset_name, con_label):
     """
-    Computes activation thresholds for every (concept, cluster) pair in a cosine similarity matrix.
+    Computes activation thresholds for every (concept, cluster) pair using chunked activation data.
+    Only loads the calibration samples needed for threshold computation.
 
     Args:
-        cos_sims_df (pd.DataFrame): Full cosine similarity matrix (rows = patches, columns = clusters).
-        gt_samples_per_concept (dict): Mapping from concept name to list of patch indices.
+        loader (ChunkedActivationLoader): Loader for chunked activation files
+        gt_samples_per_concept_cal (dict): Mapping from concept name to list of cal sample indices.
         percentiles (list): List of percentile thresholds to compute (e.g., [0.9, 0.95]).
         device (str): CUDA or CPU device.
         dataset_name (str): Dataset name (for saving cache).
         con_label (str): Label to include in cache filename.
-        cache_dir (str): Directory to save the cache file.
 
     Returns:
         dict: Mapping percentile -> {(concept, cluster): (threshold, nan)}
     """
+    from utils.memory_management_utils import ChunkedActivationLoader
+    
     cache_dir = f'Thresholds/{dataset_name}'
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f'all_percentiles_allpairs_{con_label}.pt')
 
-    # try:
-    #     all_thresholds = torch.load(cache_file)
-    #     existing_percentiles = set(all_thresholds.keys())
-    #     new_percentiles = set(percentiles) - existing_percentiles
-    #     print(f"Loaded cached thresholds. Existing: {existing_percentiles}, New: {new_percentiles}")
-    # except FileNotFoundError:
     all_thresholds = {}
     new_percentiles = set(percentiles)
-    print(f"No cache found. Will compute for all percentiles: {new_percentiles}")
+    print(f"Will compute for all percentiles: {new_percentiles}")
 
     if not new_percentiles:
         return {p: all_thresholds[p] for p in percentiles}
@@ -1118,89 +1114,282 @@ def compute_concept_thresholds_over_percentiles_all_pairs(cos_sims_df, gt_sample
     for p in new_percentiles:
         all_thresholds[p] = {}
 
-    cluster_labels = cos_sims_df.columns
-    concept_indices = {
-        concept: torch.tensor(indices, device=device)
-        for concept, indices in gt_samples_per_concept_cal.items()
-        if len(indices) > 0
-    }
-
-
-    for concept, indices in tqdm(gt_samples_per_concept_cal.items(), desc="Concepts"):
-        if len(indices) == 0:
-            continue
-
-        # Take sample indices from the original DataFrame first (still on CPU)
-        sims = cos_sims_df.iloc[indices].values  # shape: [n_samples, n_clusters]
-        sims = torch.tensor(sims, dtype=torch.float32)  # on CPU
-
-        # Mask out rows with any NaNs
-        sims = sims[~torch.isnan(sims).any(dim=1)]
-
-        if sims.numel() == 0:
-            continue
-
-        # Move to GPU once clean
-        sims = sims.to(device)
-
-        for p in new_percentiles:
-            # Compute quantile across rows (dim=0 → over samples, per cluster)
-            thresholds = torch.quantile(sims, 1 - p, dim=0)  # [n_clusters]
+    # Get all unique calibration indices we need
+    all_cal_indices = set()
+    for concept, indices in gt_samples_per_concept_cal.items():
+        all_cal_indices.update(indices)
+    all_cal_indices = sorted(list(all_cal_indices))
+    
+    if len(all_cal_indices) == 0:
+        return {p: all_thresholds[p] for p in percentiles}
+    
+    print(f"   Loading activations for {len(all_cal_indices)} calibration samples...")
+    
+    # Get cluster labels from loader
+    loader_info = loader.get_activation_info() if hasattr(loader, 'get_activation_info') else loader.get_info()
+    cluster_labels = loader_info['concept_names']
+    
+    # Load calibration data in chunks to avoid memory issues
+    chunk_size = 100000  # Process 100k samples at a time
+    num_chunks = (len(all_cal_indices) + chunk_size - 1) // chunk_size
+    
+    for chunk_start in tqdm(range(0, len(all_cal_indices), chunk_size), desc=f"Processing {len(all_cal_indices):,} calibration samples", leave=False):
+        chunk_end = min(chunk_start + chunk_size, len(all_cal_indices))
+        chunk_indices = all_cal_indices[chunk_start:chunk_end]
+        
+        # Load this chunk efficiently 
+        min_idx = min(chunk_indices)
+        max_idx = max(chunk_indices)
+        range_size = max_idx - min_idx + 1
+        
+        # Handle sparse chunks differently but don't skip them
+        if range_size > len(chunk_indices) * 20:  # More than 20x overhead
+            # For very sparse chunks, load samples individually to avoid huge memory usage
+            chunk_acts_list = []
+            for idx in chunk_indices:
+                try:
+                    # Load just this one sample
+                    single_sample = loader.load_chunk_range(idx, idx + 1).to(device)
+                    chunk_acts_list.append(single_sample)
+                except Exception:
+                    continue
+            
+            if chunk_acts_list:
+                chunk_acts = torch.cat(chunk_acts_list, dim=0)
+                del chunk_acts_list
+            else:
+                continue
+        else:
+            # Load the range for this chunk (efficient case)
+            chunk_range = loader.load_chunk_range(min_idx, max_idx + 1)
+            local_positions = [idx - min_idx for idx in chunk_indices]
+            chunk_acts = chunk_range[local_positions].to(device)
+            del chunk_range
+        
+        # Create mapping from global index to position in chunk_acts
+        chunk_idx_to_pos = {idx: pos for pos, idx in enumerate(chunk_indices)}
+        
+        # Process all concepts for this chunk
+        for concept, indices in gt_samples_per_concept_cal.items():
+            if len(indices) == 0:
+                continue
+                
+            # Find which of this concept's indices are in the current chunk
+            concept_positions = []
+            for idx in indices:
+                if idx in chunk_idx_to_pos:
+                    concept_positions.append(chunk_idx_to_pos[idx])
+            
+            if len(concept_positions) == 0:
+                continue
+                
+            # Get activations for this concept in this chunk
+            concept_chunk_acts = chunk_acts[concept_positions]  # Shape: [n_concept_samples, n_clusters]
+            
+            # Compute percentiles for each cluster
             for cluster_idx, cluster_label in enumerate(cluster_labels):
-                all_thresholds[p][(concept, cluster_label)] = (thresholds[cluster_idx].item(), float('nan'))
+                cluster_sims = concept_chunk_acts[:, cluster_idx]
+                
+                if len(cluster_sims) > 0:
+                    # Compute thresholds for all percentiles at once
+                    percentiles_tensor = torch.tensor([1 - p for p in new_percentiles], device=device)
+                    thresholds = torch.quantile(cluster_sims, percentiles_tensor, interpolation='linear')
+                    
+                    # Accumulate results (we'll combine across chunks later)
+                    for p_idx, p in enumerate(new_percentiles):
+                        key = (concept, cluster_label)
+                        if key not in all_thresholds.get(p, {}):
+                            if p not in all_thresholds:
+                                all_thresholds[p] = {}
+                            all_thresholds[p][key] = []
+                        all_thresholds[p][key].append(thresholds[p_idx].item())
+        
+        # Clean up chunk data
+        del chunk_acts
+        torch.cuda.empty_cache() if device == 'cuda' else None
+    
+    # Combine thresholds across chunks (take median of all chunk thresholds)
+    for p in all_thresholds:
+        for key in all_thresholds[p]:
+            if isinstance(all_thresholds[p][key], list):
+                # Convert list of thresholds to single value (median)
+                threshold_list = all_thresholds[p][key]
+                combined_threshold = float(torch.tensor(threshold_list).median().item())
+                all_thresholds[p][key] = (combined_threshold, float('nan'))
 
+    # Save computed thresholds
     torch.save(all_thresholds, cache_file)
+    print(f"Saved thresholds to {cache_file}")
+    
+    # Final memory cleanup
+    gc.collect()
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+
     return {p: all_thresholds[p] for p in percentiles}
+
+
+# REMOVED DUPLICATE FUNCTION: compute_concept_thresholds_over_percentiles_all_pairs
+# This version (taking cos_sims_df) was removed in favor of the memory-efficient version
+# that uses ChunkedActivationLoader (defined at line 1084)
 
         
 
-def find_activated_images_bypatch_allpairs(curr_thresholds, cos_sims, model_input_size, dataset_name, patch_size=14):
+def find_activated_images_bypatch_allpairs(curr_thresholds, loader, model_input_size, dataset_name, patch_size=14, device='cuda'):
     """
-    Find activated images for each (concept, cluster) pair over patches.
+    Computes per-image activations for all (concept, cluster) pairs using chunked data.
     """
+    from utils.memory_management_utils import ChunkedActivationLoader
+    
     split_df = get_split_df(dataset_name)
     patches_per_image = (model_input_size[0] // patch_size) ** 2
-    num_images = len(cos_sims) // patches_per_image
-
-    cos_sims_tensor = torch.tensor(cos_sims.values)
-    cluster_labels = list(cos_sims.columns)
-
-    reshaped_sims = cos_sims_tensor.reshape(num_images, patches_per_image, -1)  # [num_images, patches_per_image, n_clusters]
-
-    max_activations = torch.max(reshaped_sims, dim=1)[0]  # [num_images, n_clusters]
-
-    split_array = np.array(split_df)
-    train_mask = torch.tensor(split_array == 'train')
-    test_mask = torch.tensor(split_array == 'test')
-
+    
+    info = loader.get_activation_info()
+    total_patches = info['total_samples']
+    num_images = total_patches // patches_per_image
+    
+    # Initialize result dictionaries
     activated_images_train = defaultdict(set)
     activated_images_test = defaultdict(set)
+    activated_images_cal = defaultdict(set)
+    
+    # Process images in chunks
+    images_per_chunk = 500  # Process 500 images at a time for all-pairs
+    
+    for img_start_idx in range(0, num_images, images_per_chunk):
+        img_end_idx = min(img_start_idx + images_per_chunk, num_images)
+        
+        # Calculate patch range for these images
+        patch_start_idx = img_start_idx * patches_per_image
+        patch_end_idx = img_end_idx * patches_per_image
+        
+        # Load activation chunk (already a tensor)
+        chunk_tensor = loader.load_chunk_range(patch_start_idx, patch_end_idx)
+        num_images_in_chunk = img_end_idx - img_start_idx
+        
+        # Move to device if needed
+        if device == 'cuda' and not chunk_tensor.is_cuda:
+            chunk_tensor = chunk_tensor.cuda()
+        
+        # Reshape: [num_images_in_chunk, patches_per_image, num_clusters]
+        reshaped_sims = chunk_tensor.reshape(num_images_in_chunk, patches_per_image, -1)
+        
+        # Max over patches → [num_images_in_chunk, num_clusters]
+        max_activations = torch.max(reshaped_sims, dim=1)[0]
+        
+        # Get cluster labels from loader
+        loader_info = loader.get_activation_info() if hasattr(loader, 'get_activation_info') else loader.get_info()
+        cluster_labels = loader_info['concept_names']
+        
+        # Process each (concept, cluster) pair
+        for (concept, cluster), (threshold, _) in curr_thresholds.items():
+            cluster_idx = cluster_labels.index(str(cluster)) if str(cluster) in cluster_labels else -1
+            if cluster_idx == -1:
+                continue
+            
+            # Find activated images for this threshold
+            activated = max_activations[:, cluster_idx] >= threshold
+            
+            # Process each image in chunk
+            for local_img_idx in range(num_images_in_chunk):
+                if activated[local_img_idx]:
+                    global_img_idx = img_start_idx + local_img_idx
+                    
+                    if global_img_idx < len(split_df):
+                        split = split_df.iloc[global_img_idx]
+                        
+                        if split == 'train':
+                            activated_images_train[(concept, cluster)].add(global_img_idx)
+                        elif split == 'test':
+                            activated_images_test[(concept, cluster)].add(global_img_idx)
+                        elif split == 'cal':
+                            activated_images_cal[(concept, cluster)].add(global_img_idx)
+        
+        # Clear memory
+        del chunk_tensor, reshaped_sims, max_activations
+        gc.collect()
+    
+    return activated_images_train, activated_images_test, activated_images_cal
 
-    concept_names = list({k[0] for k in curr_thresholds.keys()})
-
-    for (concept, cluster_label) in curr_thresholds:
-        cluster_idx = cluster_labels.index(cluster_label)
-        threshold_val = curr_thresholds[(concept, cluster_label)][0]
-
-        # Activation logic
-        cluster_activations = max_activations[:, cluster_idx] >= threshold_val
-
-        # Which images activated
-        train_indices = torch.where(cluster_activations & train_mask)[0].tolist()
-        test_indices = torch.where(cluster_activations & test_mask)[0].tolist()
-
-        activated_images_train[(concept, cluster_label)].update(train_indices)
-        activated_images_test[(concept, cluster_label)].update(test_indices)
-
-    return activated_images_train, activated_images_test
 
 
-def find_activated_images_byimage_allpairs(cos_sims, curr_thresholds, dataset_name):
+
+# REMOVED DUPLICATE FUNCTION: find_activated_sentences_bytoken_allpairs
+# This wrapper version was removed. The full implementation is kept at line 1476
+
+
+# DUPLICATE FUNCTION - Commented out to avoid conflict
+# def find_activated_images_bypatch_allpairs(curr_thresholds, loader, model_input_size, dataset_name, patch_size=14):
+#     """
+#     Find activated images for each (concept, cluster) pair over patches.
+#     Memory-efficient version that processes one split at a time.
+#     
+#     Args:
+#         curr_thresholds: Dictionary of (concept, cluster) -> (threshold, _) pairs
+#         loader: ChunkedActivationLoader instance
+#         model_input_size: Model input size tuple
+#         dataset_name: Dataset name
+#         patch_size: Patch size (default 14)
+#     
+#     Returns:
+#         Tuple of (activated_images_train, activated_images_test, activated_images_cal)
+#     """
+#     from utils.memory_management_utils import ChunkedActivationLoader
+#     
+#     split_df = get_split_df(dataset_name)
+#     patches_per_image = (model_input_size[0] // patch_size) ** 2
+#     
+#     activated_images_train = defaultdict(set)
+#     activated_images_test = defaultdict(set)
+#     activated_images_cal = defaultdict(set)
+#     
+#     cluster_labels = loader.columns
+#     
+#     # Process each split separately to save memory
+#     for split_name, activated_dict in [('train', activated_images_train), 
+#                                        ('test', activated_images_test), 
+#                                        ('cal', activated_images_cal)]:
+#         
+#         # Load only the data for this split
+#         split_tensor = loader.load_split_tensor(split_name, dataset_name, model_input_size, patch_size)
+#         
+#         # Get the indices for this split
+#         split_indices = split_df[split_df == split_name].index.tolist()
+#         num_split_images = len(split_indices)
+#         
+#         # Reshape to image-level max activations
+#         reshaped_sims = split_tensor.reshape(num_split_images, patches_per_image, -1)
+#         max_activations = torch.max(reshaped_sims, dim=1)[0]  # [num_split_images, n_clusters]
+#         
+#         # Process each concept-cluster pair
+#         for (concept, cluster_label) in curr_thresholds:
+#             cluster_idx = cluster_labels.index(cluster_label)
+#             threshold_val = curr_thresholds[(concept, cluster_label)][0]
+#             
+#             # Find activated images in this split
+#             cluster_activations = max_activations[:, cluster_idx] >= threshold_val
+#             activated_indices = torch.where(cluster_activations)[0].tolist()
+#             
+#             # Map back to global image indices
+#             global_indices = [split_indices[i] for i in activated_indices]
+#             activated_dict[(concept, cluster_label)].update(global_indices)
+#         
+#         # Clean up memory for this split
+#         del split_tensor, reshaped_sims, max_activations
+#         gc.collect()
+#         if torch.cuda.is_available():
+#             torch.cuda.empty_cache()
+#     
+#     return activated_images_train, activated_images_test, activated_images_cal
+
+
+def find_activated_images_byimage_allpairs(loader, curr_thresholds, dataset_name):
     """
     Find activated images for each (concept, cluster) pair using image-level activations.
+    Memory-efficient version that processes one split at a time.
 
     Args:
-        cos_sims (pd.DataFrame): Cosine similarity matrix (images × clusters)
+        loader: ChunkedActivationLoader instance
         curr_thresholds (dict): {(concept, cluster): (threshold, _)}
         dataset_name (str): For retrieving train/test split
 
@@ -1208,36 +1397,56 @@ def find_activated_images_byimage_allpairs(cos_sims, curr_thresholds, dataset_na
         Tuple of dicts: 
             activated_images_train[(concept, cluster)] = set(image indices)
             activated_images_test[(concept, cluster)] = set(image indices)
+            activated_images_cal[(concept, cluster)] = set(image indices)
     """
+    from utils.memory_management_utils import ChunkedActivationLoader
+    
     split_df = get_split_df(dataset_name)
-    split_array = np.array(split_df)
-    train_mask = torch.tensor(split_array == 'train')
-    test_mask = torch.tensor(split_array == 'test')
-
-    cos_sims_tensor = torch.tensor(cos_sims.values)  # [num_images, num_clusters]
-    cluster_labels = list(cos_sims.columns)
-
+    cluster_labels = loader.columns
+    
     # Map cluster label → column index
     cluster_to_index = {label: idx for idx, label in enumerate(cluster_labels)}
-
+    
     activated_images_train = defaultdict(set)
     activated_images_test = defaultdict(set)
-
-    for (concept, cluster), (threshold, _) in curr_thresholds.items():
-        if cluster not in cluster_to_index:
+    activated_images_cal = defaultdict(set)
+    
+    # Process each split separately to save memory
+    for split_name, activated_dict in [('train', activated_images_train), 
+                                       ('test', activated_images_test), 
+                                       ('cal', activated_images_cal)]:
+        
+        # Get indices for this split
+        split_indices = split_df[split_df == split_name].index.tolist()
+        if not split_indices:
             continue
-
-        cluster_idx = cluster_to_index[cluster]
-        sims = cos_sims_tensor[:, cluster_idx]  # [num_images]
-
-        activated = sims >= threshold  # [num_images]
-        train_indices = torch.where(activated & train_mask)[0].tolist()
-        test_indices = torch.where(activated & test_mask)[0].tolist()
-
-        activated_images_train[(concept, cluster)].update(train_indices)
-        activated_images_test[(concept, cluster)].update(test_indices)
-
-    return activated_images_train, activated_images_test
+            
+        # Load only the data for this split
+        split_tensor = loader.load_split_tensor(split_name, dataset_name, ('cls', 'cls'))
+        
+        # Process each concept-cluster pair
+        for (concept, cluster), (threshold, _) in curr_thresholds.items():
+            if cluster not in cluster_to_index:
+                continue
+                
+            cluster_idx = cluster_to_index[cluster]
+            sims = split_tensor[:, cluster_idx]  # [num_split_images]
+            
+            # Find activated images in this split
+            activated = sims >= threshold
+            activated_indices = torch.where(activated)[0].tolist()
+            
+            # Map back to global image indices
+            global_indices = [split_indices[i] for i in activated_indices]
+            activated_dict[(concept, cluster)].update(global_indices)
+        
+        # Clean up memory for this split
+        del split_tensor
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    return activated_images_train, activated_images_test, activated_images_cal
 
 
 def find_activated_sentences_bytoken_allpairs(act_metrics, curr_thresholds, model_input_size, dataset_name):
@@ -1269,9 +1478,11 @@ def find_activated_sentences_bytoken_allpairs(act_metrics, curr_thresholds, mode
     split_array = np.array(split_df)
     train_mask = torch.tensor(split_array == 'train')
     test_mask = torch.tensor(split_array == 'test')
+    cal_mask = torch.tensor(split_array == 'cal')
 
     activated_sentences_train = defaultdict(set)
     activated_sentences_test = defaultdict(set)
+    activated_sentences_cal = defaultdict(set)
 
     for (concept, cluster_label), threshold in curr_thresholds.items():
         cluster_idx = col_index_map[(concept, cluster_label)]
@@ -1281,111 +1492,318 @@ def find_activated_sentences_bytoken_allpairs(act_metrics, curr_thresholds, mode
 
         train_indices = torch.where(cluster_activations & train_mask)[0].tolist()
         test_indices = torch.where(cluster_activations & test_mask)[0].tolist()
+        cal_indices = torch.where(cluster_activations & cal_mask)[0].tolist()
 
         activated_sentences_train[(concept, cluster_label)].update(train_indices)
         activated_sentences_test[(concept, cluster_label)].update(test_indices)
+        activated_sentences_cal[(concept, cluster_label)].update(cal_indices)
 
-    return activated_sentences_train, activated_sentences_test
+    return activated_sentences_train, activated_sentences_test, activated_sentences_cal
 
 
 
-def compute_detection_metrics_over_percentiles_allpairs(percentiles, gt_images_per_concept_test, 
+def compute_detection_metrics_over_percentiles_allpairs(percentiles, gt_images_per_concept_split, 
                                                dataset_name, model_input_size, device, 
-                                               con_label, sim_metrics, scratch_dir, sample_type='patch',
+                                               con_label, loader, scratch_dir, sample_type='patch',
                                                     cluster_batch_size=10, patch_size=14, n_clusters=1000):
     """
-    Computes detection metrics over multiple percentiles.
-
+    Loads activations only once per split and processes all percentiles.
+    
     Args:
         percentiles: List of percentiles
-        gt_samples_per_concept_test: {concept: patch indices}
-        gt_images_per_concept_test: {concept: image indices}
-        sim_metrics: Cosine similarities
+        gt_images_per_concept_split: {concept: image indices} for the split being evaluated
         dataset_name: Dataset name
         model_input_size: (width, height) tuple
         device: CUDA/CPU device
         con_label: Label for saving
+        loader: ChunkedActivationLoader
+        scratch_dir: Scratch directory
         sample_type: 'patch' or 'cls'
+        cluster_batch_size: Batch size for processing clusters
         patch_size: Patch size
+        n_clusters: Number of clusters
     Returns:
         all_metrics: dict mapping per -> metrics_df
     """
-    # if sample_type == 'patch':
-    #     split_df = get_patch_split_df(dataset_name, model_input_size=model_input_size)
-    #     relevant_indices = set(filter_patches_by_image_presence(split_df.index, dataset_name, model_input_size).tolist())
-    # else:
-    #     split_df = get_split_df(dataset_name)
-    #     relevant_indices = set(split_df.index.tolist())
-    # train_mask = torch.tensor(split_df.values == 'train', device=device)
-    # test_mask = torch.tensor(split_df.values == 'test', device=device)
+    from collections import defaultdict
+    import gc
     
-    # thresholds = compute_concept_thresholds_over_percentiles_all_pairs(sim_metrics, gt_samples_per_concept_test, percentiles, device,
-    #                                         f"{dataset_name}-Cal", con_label)
+    # Ensure we're using GPU if available
+    device = 'cuda' if torch.cuda.is_available() and device == 'cuda' else 'cpu'
+    # print(f"Using device: {device}")
     
-    thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
+    # Get actual number of clusters from the loader
+    info = loader.get_activation_info()
+    n_clusters = info['num_concepts']
     
-    # cluster_labels = set([cluster for _, cluster in thresholds[percentiles[0]].keys()])
-    # cluster_max_activations = preload_max_activations_per_cluster(
-    #     cluster_labels, dataset_name, cossim_file, scratch_dir, model_input_size, patch_size, device, split_df.shape[0]
-    # )
-
+    # Load thresholds for all percentiles
+    threshold_label = con_label.replace("_cal", "") if con_label.endswith("_cal") else con_label
+    thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{threshold_label}.pt', weights_only=False)
+    
+    # Get split info
+    split_df = get_split_df(dataset_name)
+    if con_label.endswith("_cal"):
+        eval_split = 'cal'
+    else:
+        eval_split = 'test'
+    
+    # Create masks for different splits on GPU
+    split_array = np.array(split_df)
+    eval_mask = torch.tensor(split_array == eval_split, device=device)
+    eval_indices_set = set(torch.where(eval_mask)[0].cpu().numpy())
+    
+    # Precompute max activations for ALL images at once
+    # print(f"Precomputing max activations for {eval_split} split on {device}...")
+    
+    if sample_type == 'patch':
+        # Check if this is a text dataset
+        if isinstance(model_input_size[0], str) and model_input_size[0] == 'text':
+            # For text datasets, load token counts to determine tokens per paragraph
+            token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
+            
+            if not os.path.exists(token_counts_file):
+                raise FileNotFoundError(f"Token counts file not found: {token_counts_file}")
+            
+            token_counts = torch.load(token_counts_file, weights_only=False)
+            
+            # Convert to tokens per sentence/paragraph
+            tokens_per_paragraph = [sum(sent_tokens) if isinstance(sent_tokens, list) else sent_tokens 
+                                  for sent_tokens in token_counts]
+            
+            info = loader.get_activation_info()
+            total_tokens = info['total_samples']
+            num_paragraphs = len(tokens_per_paragraph)
+            
+            # For text, we'll use variable-size handling below
+            patches_per_image = None  # Variable for text
+            num_images = num_paragraphs
+        else:
+            # For image datasets, use fixed patch grid
+            patches_per_image = (model_input_size[0] // patch_size) ** 2
+            info = loader.get_activation_info()
+            total_patches = info['total_samples']
+            num_images = total_patches // patches_per_image
+        
+        # Allocate on GPU if possible
+        if device == 'cuda':
+            # Check available GPU memory
+            torch.cuda.empty_cache()
+            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            required_memory = num_images * n_clusters * 4  # float32
+            
+            if required_memory < available_memory * 0.8:  # Use 80% of available memory
+                # print(f"Allocating {required_memory / 1e9:.2f}GB on GPU")
+                max_activations_all = torch.zeros(num_images, n_clusters, dtype=torch.float32, device=device)
+                keep_on_gpu = True
+            else:
+                # print(f"Not enough GPU memory ({required_memory / 1e9:.2f}GB required), using CPU for storage")
+                max_activations_all = torch.zeros(num_images, n_clusters, dtype=torch.float32)
+                keep_on_gpu = False
+        else:
+            max_activations_all = torch.zeros(num_images, n_clusters, dtype=torch.float32)
+            keep_on_gpu = False
+        
+        # Process in chunks
+        if patches_per_image is not None:
+            # Fixed patch size (image datasets)
+            images_per_chunk = 500 if device == 'cuda' else 1000
+            for img_start_idx in tqdm(range(0, num_images, images_per_chunk), desc="Loading activations"):
+                img_end_idx = min(img_start_idx + images_per_chunk, num_images)
+                
+                # Calculate patch range
+                patch_start_idx = img_start_idx * patches_per_image
+                patch_end_idx = img_end_idx * patches_per_image
+                
+                # Load chunk
+                chunk_tensor = loader.load_chunk_range(patch_start_idx, patch_end_idx)
+                num_images_in_chunk = img_end_idx - img_start_idx
+                
+                # Move to GPU if needed
+                if device == 'cuda' and not chunk_tensor.is_cuda:
+                    chunk_tensor = chunk_tensor.cuda()
+                
+                # Reshape and compute max on GPU
+                reshaped = chunk_tensor.reshape(num_images_in_chunk, patches_per_image, -1)
+                max_acts = torch.max(reshaped, dim=1)[0]  # [num_images_in_chunk, n_clusters]
+                
+                # Store (keep on GPU if possible)
+                if keep_on_gpu:
+                    max_activations_all[img_start_idx:img_end_idx] = max_acts
+                else:
+                    max_activations_all[img_start_idx:img_end_idx] = max_acts.cpu()
+                
+                # Clean up
+                del chunk_tensor, reshaped, max_acts
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
+        else:
+            # Variable token size (text datasets)
+            paragraphs_per_chunk = 100 if device == 'cuda' else 200
+            
+            # Calculate cumulative token indices
+            cumulative_tokens = [0]
+            for tokens in tokens_per_paragraph:
+                cumulative_tokens.append(cumulative_tokens[-1] + tokens)
+            
+            for para_start_idx in tqdm(range(0, num_paragraphs, paragraphs_per_chunk), desc="Loading activations"):
+                para_end_idx = min(para_start_idx + paragraphs_per_chunk, num_paragraphs)
+                
+                # Calculate token range for this chunk of paragraphs
+                token_start_idx = cumulative_tokens[para_start_idx]
+                token_end_idx = cumulative_tokens[para_end_idx]
+                
+                # Load chunk
+                chunk_tensor = loader.load_chunk_range(token_start_idx, token_end_idx)
+                
+                # Move to GPU if needed
+                if device == 'cuda' and not chunk_tensor.is_cuda:
+                    chunk_tensor = chunk_tensor.cuda()
+                
+                # Process each paragraph separately due to variable lengths
+                chunk_start = 0
+                for para_idx in range(para_start_idx, para_end_idx):
+                    para_tokens = tokens_per_paragraph[para_idx]
+                    para_acts = chunk_tensor[chunk_start:chunk_start + para_tokens]
+                    
+                    # Compute max activation for this paragraph
+                    max_act = torch.max(para_acts, dim=0)[0]
+                    
+                    # Store results
+                    if keep_on_gpu:
+                        max_activations_all[para_idx] = max_act
+                    else:
+                        max_activations_all[para_idx] = max_act.cpu()
+                    
+                    chunk_start += para_tokens
+                
+                # Clean up
+                del chunk_tensor
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
+                
+    else:  # cls
+        # For CLS, activations are already at image level
+        # print("Loading image-level activations...")
+        max_activations_all = loader.load_full_tensor()
+        if device == 'cuda' and max_activations_all.numel() * 4 < torch.cuda.get_device_properties(0).total_memory * 0.8:
+            max_activations_all = max_activations_all.cuda()
+            keep_on_gpu = True
+        else:
+            max_activations_all = max_activations_all.cpu()
+            keep_on_gpu = False
+    
+    # print(f"Max activations shape: {max_activations_all.shape}, device: {max_activations_all.device}")
+    
+    # Get cluster labels
+    loader_info = loader.get_activation_info() if hasattr(loader, 'get_activation_info') else loader.get_info()
+    cluster_labels = loader_info['concept_names']
+    
+    # Precompute GT image sets as GPU tensors for faster intersection
+    gt_image_tensors = {}
+    num_images = max_activations_all.shape[0]
+    
+    for concept, image_indices in gt_images_per_concept_split.items():
+        # Create a boolean mask for GT images
+        gt_mask = torch.zeros(num_images, dtype=torch.bool, device=device if keep_on_gpu else 'cpu')
+        if image_indices:
+            valid_indices = [idx for idx in image_indices if idx < num_images]
+            if valid_indices:
+                gt_mask[valid_indices] = True
+        gt_image_tensors[concept] = gt_mask
+    
+    # Now process each percentile using the precomputed max activations
     for per in tqdm(percentiles, desc="Computing metrics for each percentile"):
         save_path = f'Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{per}_{con_label}.csv'
-        # if os.path.exists(save_path):
-        #     print(f"Skipping per {per}")
-        #     continue
-        # else:
-        # === Thresholds for current percentile
+        
         curr_thresholds = thresholds[per]
-
-        # === Activation
-        if sample_type == 'patch':
-            if 'text' in model_input_size:
-                _, activated_images_test = find_activated_sentences_bytoken_allpairs(sim_metrics, curr_thresholds, 
-                                                                                    model_input_size, dataset_name)
-            else:
-                 _, activated_images_test = find_activated_images_bypatch_allpairs(curr_thresholds, sim_metrics, 
-                                                                               model_input_size, dataset_name, patch_size=14)
-        #     _, activated_images_test = find_activated_images_from_max_activations(
-        #                                     curr_thresholds, cluster_max_activations, train_mask, test_mask
-        #                                 )
-        elif sample_type == 'cls':
-             _, activated_images_test = find_activated_images_byimage_allpairs(
-                                            sim_metrics, curr_thresholds, dataset_name
-                                        )
-        else:
-            raise ValueError(f"Unknown sample_type: {sample_type}")
-
-        # === Compute TP, FP, TN, FN for each (concept, cluster) pair ===
+        
+        # Vectorized threshold processing
         fp_count, tp_count, tn_count, fn_count = {}, {}, {}, {}
         
-        split_df = get_split_df(dataset_name)
-        all_indices = set(split_df[split_df == 'test'].index)
-
-        for concept in gt_images_per_concept_test.keys():
-            #gt_images = set(gt_images_per_concept_test[concept]) & relevant_indices
-            gt_images = set(gt_images_per_concept_test[concept])
-
-            for cluster in range(n_clusters):
-                cluster = str(cluster)
-                #activated_images = activated_images_test.get((concept, cluster), set()) & relevant_indices
-                activated_images = activated_images_test.get((concept, cluster), set())
-
-                tp = len(gt_images & activated_images)
-                fp = len(activated_images - gt_images)
-                fn = len(gt_images - activated_images)
-                tn = len(all_indices) - (tp + fp + fn)
-
-                key = (concept, cluster)
-                tp_count[key] = tp
-                fp_count[key] = fp
-                fn_count[key] = fn
-                tn_count[key] = tn
-
+        # Process in batches if on GPU
+        if keep_on_gpu and device == 'cuda':
+            # Process concepts in batches for better GPU utilization
+            for concept in gt_images_per_concept_split.keys():
+                gt_mask = gt_image_tensors[concept]
+                
+                # Process all clusters for this concept
+                for cluster in range(n_clusters):
+                    cluster_str = str(cluster)
+                    key = (concept, cluster_str)
+                    
+                    if key in curr_thresholds:
+                        threshold = curr_thresholds[key][0]
+                        
+                        # Vectorized activation check on GPU
+                        cluster_idx = cluster_labels.index(cluster_str) if cluster_str in cluster_labels else -1
+                        if cluster_idx == -1:
+                            continue
+                        
+                        # GPU operations
+                        activated_mask = max_activations_all[:, cluster_idx] >= threshold
+                        activated_in_split = activated_mask & eval_mask
+                        
+                        # Compute metrics using GPU operations
+                        tp = (activated_in_split & gt_mask).sum().item()
+                        fp = (activated_in_split & ~gt_mask).sum().item()
+                        fn = (~activated_in_split & gt_mask & eval_mask).sum().item()
+                        tn = (~activated_in_split & ~gt_mask & eval_mask).sum().item()
+                        
+                        tp_count[key] = tp
+                        fp_count[key] = fp
+                        fn_count[key] = fn
+                        tn_count[key] = tn
+        else:
+            # CPU path - use original logic but with some optimizations
+            # Find activated images for this percentile
+            activated_images_split = defaultdict(set)
+            
+            # Process each (concept, cluster) pair
+            for (concept, cluster), (threshold, _) in curr_thresholds.items():
+                cluster_idx = cluster_labels.index(str(cluster)) if str(cluster) in cluster_labels else -1
+                if cluster_idx == -1:
+                    continue
+                    
+                # Find which images are activated for this threshold
+                activated_mask = max_activations_all[:, cluster_idx] >= threshold
+                
+                # Get indices of activated images
+                activated_indices = torch.where(activated_mask)[0].tolist()
+                
+                # Filter by split
+                for img_idx in activated_indices:
+                    if img_idx in eval_indices_set:
+                        activated_images_split[(concept, cluster)].add(img_idx)
+            
+            # Compute TP, FP, TN, FN
+            for concept in gt_images_per_concept_split.keys():
+                gt_images = set(gt_images_per_concept_split[concept])
+                
+                for cluster in range(n_clusters):
+                    cluster = str(cluster)
+                    activated_images = activated_images_split.get((concept, cluster), set())
+                    
+                    tp = len(gt_images & activated_images)
+                    fp = len(activated_images - gt_images)
+                    fn = len(gt_images - activated_images)
+                    tn = len(eval_indices_set) - (tp + fp + fn)
+                    
+                    key = (concept, cluster)
+                    tp_count[key] = tp
+                    fp_count[key] = fp
+                    fn_count[key] = fn
+                    tn_count[key] = tn
+        
         metrics = compute_stats_from_counts(tp_count, fp_count, tn_count, fn_count)
-
-        # Save
         metrics.to_csv(save_path, index=False)
+    
+    # Clean up
+    del max_activations_all
+    if gt_image_tensors:
+        del gt_image_tensors
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def find_best_clusters_per_concept_from_detectionmetrics(dataset_name, 
@@ -1439,7 +1857,7 @@ def find_best_clusters_per_concept_from_detectionmetrics(dataset_name,
                 }
                 
     torch.save(best_cluster_per_concept, f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt')
-    print(f"Best matches saved to Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt :)")
+    # print(f"Best matches saved to Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt :)")
     return best_cluster_per_concept
 
 
@@ -2303,7 +2721,7 @@ def filter_and_save_best_clusters(dataset_name, con_label):
             output_filename = os.path.basename(csv_file).replace("_allpairs", "").replace(".csv", ".pt")
             save_path = os.path.join(dir, output_filename)
             torch.save(filtered_df, save_path)
-            print(f"Saved: {save_path}")
+            # print(f"Saved: {save_path}")
         else:
             print(f"Warning: No matching rows found in {csv_file}")
             
@@ -2330,124 +2748,351 @@ def get_matched_concepts_and_data(
     gt_samples_per_concept_cal=None,
     gt_samples_per_concept_test=None,
     gt_samples_per_concept=None,
-    concepts=None
+    concepts=None,
+    scratch_dir='/scratch/cgoldberg/',
+    acts_file=None
 ):
     """
-    Loads best alignment results and filters cosine sims, concept vectors,
-    and ground truth patch mappings for matched clusters.
+    Loads best alignment results and creates MatchedConceptActivationLoader for concept-aligned activation access.
+    Always uses ChunkedActivationLoader internally for memory efficiency.
 
     Args:
         dataset_name (str): Name of the dataset (e.g., 'CLEVR').
         con_label (str): Concept label (e.g., 'CLIP_kmeans_1000_patch...').
-        cos_sims (pd.DataFrame): Cosine similarity matrix (patches × clusters).
+        act_metrics: IGNORED - will always use ChunkedActivationLoader instead.
+        gt_patches_per_concept_cal (dict): Concept → list of calibration patch indices.
         gt_patches_per_concept_test (dict): Concept → list of test patch indices.
         gt_patches_per_concept (dict): Concept → list of train patch indices.
         concepts (dict): Cluster ID → concept embedding.
+        scratch_dir (str): Scratch directory path
 
     Returns:
-        matched_acts (pd.DataFrame): Cosine sims for matched clusters.
+        matched_acts_loader (MatchedConceptActivationLoader): Memory-efficient concept-matched activation loader.
+        matched_gt_cal (dict): Cluster ID → list of calibration patches.
         matched_gt_test (dict): Cluster ID → list of test patches.
-        matched_gt_train (dict): Cluster ID → list of train patches.
+        matched_gt (dict): Cluster ID → list of train patches.
         matched_concepts (dict): Cluster ID → concept vector.
     """
+    from utils.memory_management_utils import ChunkedActivationLoader, MatchedConceptActivationLoader
+    
     alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
-    alignment_results = torch.load(alignment_path)
+    alignment_results = torch.load(alignment_path, weights_only=False)
 
     matching_cluster_ids = [info['best_cluster'] for info in alignment_results.values()]
     
-    matched_acts, matched_gt_cal, matched_gt_test, matched_gt, matched_concepts = None, None, None, None, None
+    matched_acts_loader, matched_gt_cal, matched_gt_test, matched_gt, matched_concepts = None, None, None, None, None
     
     # Create cluster_id -> concept_name mapping
     cluster_to_concept = {info['best_cluster']: concept_name for concept_name, info in alignment_results.items()}
     
-    if act_metrics is not None:
-        # Select columns for matching clusters (keep cluster IDs as column names)
-        matched_acts = act_metrics[[col for col in act_metrics.columns if col in matching_cluster_ids]].copy()
-        matched_acts.to_csv(f'Unsupervised_Matches/{dataset_name}/actmetrics_{con_label}.csv')
+    # Always use ChunkedActivationLoader for activation metrics
+    # print("Creating MatchedConceptActivationLoader for memory-efficient activation access...")
+    try:
+        # Use provided acts_file if available, otherwise construct from con_label
+        if acts_file is None:
+            # Determine activation file name based on con_label (strip _cal suffix if present)
+            base_con_label = con_label.replace('_cal', '') if con_label.endswith('_cal') else con_label
+            if 'linsep' in con_label and 'kmeans' in con_label:
+                # For kmeans linsep, need to extract parts and reconstruct
+                parts = base_con_label.split('_')
+                model_idx = parts.index('kmeans') - 1
+                model_name = parts[model_idx]
+                n_clusters = parts[parts.index('kmeans') + 1]
+                sample_type = parts[parts.index('linsep') + 1]
+                percent_thru_model = parts[-1]
+                acts_file = f"dists_kmeans_{n_clusters}_linsep_concepts_{model_name}_{sample_type}_embeddings_percentthrumodel_{percent_thru_model}"
+            elif 'linsep' in con_label:
+                acts_file = f"dists_{base_con_label}"
+            elif 'kmeans' in con_label:
+                # For regular kmeans, need to extract parts and add "concepts"
+                parts = base_con_label.split('_')
+                model_idx = 0
+                model_name = parts[model_idx]
+                n_clusters = parts[parts.index('kmeans') + 1]
+                
+                # Find sample_type - it's after n_clusters and before 'embeddings'
+                embeddings_idx = parts.index('embeddings')
+                sample_type = parts[embeddings_idx - 1]
+                
+                percent_thru_model = parts[-1]
+                acts_file = f"cosine_similarities_kmeans_{n_clusters}_concepts_{model_name}_{sample_type}_embeddings_percentthrumodel_{percent_thru_model}"
+            else:
+                acts_file = f"cosine_similarities_{base_con_label}"
+        else:
+            # Use the provided acts_file, removing .pt extension if present since ChunkedActivationLoader adds it
+            if acts_file.endswith('.pt'):
+                acts_file = acts_file[:-3]
+        
+        activation_loader = ChunkedActivationLoader(dataset_name, acts_file, scratch_dir)
+        
+        # Create the matched concept activation loader
+        matched_acts_loader = MatchedConceptActivationLoader(activation_loader, cluster_to_concept)
+        
+        # NOTE: Not saving CSV automatically to avoid loading all data at once
+        # If you need the CSV for backward compatibility, call: matched_acts_loader.to_csv(path)
+        # print(f"Created MatchedConceptActivationLoader with {len(matched_acts_loader.columns)} matching clusters")
+            
+    except Exception as e:
+        print(f"DEBUG: Could not load chunked activation files: {e}")
+        print(f"DEBUG: Exception type: {type(e)}")
+        matched_acts_loader = None
     
     if gt_samples_per_concept_cal is not None:
-        # Map cluster IDs to ground truth patches
-        matched_gt_cal = {info['best_cluster']: gt_samples_per_concept_cal[concept_name]
-                          for concept_name, info in alignment_results.items()}
+        # Map concept names to ground truth patches (for consistency with supervised methods)
+        matched_gt_cal = {concept_name: gt_samples_per_concept_cal[concept_name]
+                          for concept_name, info in alignment_results.items()
+                          if concept_name in gt_samples_per_concept_cal}
         torch.save(matched_gt_cal, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_cal_{con_label}.pt')
     
     if gt_samples_per_concept_test is not None:
-        # Map cluster IDs to ground truth patches
-        matched_gt_test = {info['best_cluster']: gt_samples_per_concept_test[concept_name]
-                           for concept_name, info in alignment_results.items()}
+        # Map concept names to ground truth patches (for consistency with supervised methods)
+        matched_gt_test = {concept_name: gt_samples_per_concept_test[concept_name]
+                           for concept_name, info in alignment_results.items()
+                           if concept_name in gt_samples_per_concept_test}
         torch.save(matched_gt_test, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_test_{con_label}.pt')
         
     if gt_samples_per_concept is not None:
-        # Map cluster IDs to ground truth patches
-        matched_gt = {info['best_cluster']: gt_samples_per_concept[concept_name]
-                      for concept_name, info in alignment_results.items()}
+        # Map concept names to ground truth patches (for consistency with supervised methods)
+        matched_gt = {concept_name: gt_samples_per_concept[concept_name]
+                      for concept_name, info in alignment_results.items()
+                      if concept_name in gt_samples_per_concept}
         torch.save(matched_gt, f'Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_{con_label}.pt')
         
     if concepts is not None:
-        # Map cluster IDs to concept vectors
-        matched_concepts = {info['best_cluster']: concepts[info['best_cluster']] 
+        # Map concept names to concept vectors (using the matched cluster vectors)
+        # This ensures consistency with supervised methods where concept names are keys
+        matched_concepts = {concept_name: concepts[info['best_cluster']] 
                            for concept_name, info in alignment_results.items() 
                            if info['best_cluster'] in concepts}
         torch.save(matched_concepts, f'Unsupervised_Matches/{dataset_name}/concepts_{con_label}.pt') 
 
-    return matched_acts, matched_gt_cal, matched_gt_test, matched_gt, matched_concepts
+    return matched_acts_loader, matched_gt_cal, matched_gt_test, matched_gt, matched_concepts
 
 
-def get_matched_concepts_and_data_chunked(
+# REMOVED DUPLICATE FUNCTION: get_matched_concepts_and_data
+# This simpler version with fewer parameters was removed in favor of the more
+# comprehensive version at line 2575 that supports optional parameters
+
+
+def plot_cluster_f1_distributions_auto(
     dataset_name,
-    con_label,
-    act_metrics,
-    gt_samples_per_concept_test,
-    gt_samples_per_concept,
-    concepts
+    model_name,
+    n_clusters,
+    gt_concepts_to_show=None,
+    top_n=None,
+    figsize_per_concept=(10, 4),
+    save_dir=None,
+    percentiles_to_search=[0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95],
+    metric='f1'
 ):
     """
-    Chunked version that saves results to Chunked_Unsupervised_Matches folder.
+    Automatically finds the best percentile based on average calibration performance across all concepts,
+    then plots the TEST F1 scores for clusters at that single best percentile, sorted by test performance.
     
-    Loads best alignment results and filters cosine sims, concept vectors,
-    and ground truth patch mappings for matched clusters.
-
     Args:
-        dataset_name (str): Name of the dataset (e.g., 'CLEVR').
-        con_label (str): Concept label (e.g., 'CLIP_kmeans_1000_patch...').
-        cos_sims (pd.DataFrame): Cosine similarity matrix (patches × clusters).
-        gt_patches_per_concept_test (dict): Concept → list of test patch indices.
-        gt_patches_per_concept (dict): Concept → list of train patch indices.
-        concepts (dict): Cluster ID → concept embedding.
-
+        dataset_name (str): Name of the dataset (e.g., 'CLEVR')
+        model_name (str): Model name (e.g., 'CLIP')
+        n_clusters (int): Number of clusters (e.g., 1000)
+        gt_concepts_to_show (list): List of specific concepts to plot. If None, plots all.
+        top_n (int): If specified, only show the top N highest F1 scoring clusters
+        figsize_per_concept (tuple): Figure size for each concept's plot
+        save_dir (str): Directory to save plots. If None, doesn't save.
+        percentiles_to_search (list): Percentiles to search for best calibration performance
+        metric (str): Metric to optimize ('f1', 'precision', 'recall')
+        
     Returns:
-        matched_acts (pd.DataFrame): Cosine sims for matched clusters.
-        matched_gt_test (dict): Cluster ID → list of test patches.
-        matched_gt_train (dict): Cluster ID → list of train patches.
-        matched_concepts (dict): Cluster ID → concept vector.
+        dict: Mapping of concept -> list of (cluster_id, test_f1_score) tuples
     """
-    import os
+    from tqdm import tqdm
     
-    alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
-    alignment_results = torch.load(alignment_path)
-
-    matching_cluster_ids = [info['best_cluster'] for info in alignment_results.values()]
+    # Construct concept label based on model type
+    if 'patch' in model_name.lower() or 'CLIP' in model_name:
+        sample_type = 'patch'
+        con_label = f'{model_name}_kmeans_{n_clusters}_patch_embeddings_kmeans_percentthrumodel_100'
+    else:
+        sample_type = 'cls'
+        con_label = f'{model_name}_kmeans_{n_clusters}_cls_embeddings_kmeans_percentthrumodel_100'
     
-    # Create Chunked_Unsupervised_Matches directory
-    os.makedirs(f'Chunked_Unsupervised_Matches/{dataset_name}', exist_ok=True)
+    print(f"Using concept label: {con_label}")
     
-    matched_acts, matched_gt_test, matched_gt, matched_concepts = None, None, None, None
-    if act_metrics is not None:
-        matched_acts = act_metrics[[col for col in act_metrics.columns if col in matching_cluster_ids]]
-        matched_acts.to_csv(f'Chunked_Unsupervised_Matches/{dataset_name}/actmetrics_{con_label}.csv')
+    # Find the single best percentile based on average calibration performance
+    print("Finding best percentile from calibration data...")
+    best_percentile = None
+    best_avg_metric = -1
+    best_matches_cal = None
     
-    if gt_samples_per_concept_test is not None:
-        matched_gt_test = {info['best_cluster']: gt_samples_per_concept_test[c]
-                           for c, info in alignment_results.items()}
-        torch.save(matched_gt_test, f'Chunked_Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_test_{con_label}.pt')
+    for per in tqdm(percentiles_to_search, desc="Searching calibration percentiles"):
+        # Load CALIBRATION metrics - look for _cal suffix in same directory
+        cal_metrics_path = f'Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{per}_{con_label}_cal.csv'
         
-    if gt_samples_per_concept is not None:
-        matched_gt = {info['best_cluster']: gt_samples_per_concept[c]
-                            for c, info in alignment_results.items()}
-        torch.save(matched_gt, f'Chunked_Unsupervised_Matches/{dataset_name}/gt_samples_per_concept_{con_label}.pt')
+        try:
+            cal_df = pd.read_csv(cal_metrics_path)
+        except FileNotFoundError:
+            print(f"Warning: Missing calibration file {cal_metrics_path}")
+            continue
+            
+        # Parse concept column to extract GT concept and cluster ID
+        parsed_data = []
+        for idx, row in cal_df.iterrows():
+            concept_tuple = ast.literal_eval(row['concept'])
+            gt_concept = concept_tuple[0]
+            cluster_id = concept_tuple[1]
+            
+            if gt_concepts_to_show and gt_concept not in gt_concepts_to_show:
+                continue
+                
+            parsed_data.append({
+                'gt_concept': gt_concept,
+                'cluster_id': cluster_id,
+                metric: row[metric] if metric in row else 0.0
+            })
         
-    if concepts is not None:
-        matched_concepts = {cid: concepts[cid] for cid in matching_cluster_ids if cid in concepts}
-        torch.save(matched_concepts, f'Chunked_Unsupervised_Matches/{dataset_name}/concepts_{con_label}.pt') 
-
-    return matched_acts, matched_gt_test, matched_gt, matched_concepts
+        if not parsed_data:
+            continue
+            
+        parsed_df = pd.DataFrame(parsed_data)
+        
+        # Find best cluster for each GT concept
+        concept_best_metrics = []
+        matches_at_this_percentile = {}
+        
+        for concept in parsed_df['gt_concept'].unique():
+            concept_df = parsed_df[parsed_df['gt_concept'] == concept]
+            if not concept_df.empty and concept_df[metric].notna().any():
+                best_row = concept_df.loc[concept_df[metric].idxmax()]
+                concept_best_metrics.append(best_row[metric])
+                matches_at_this_percentile[concept] = (best_row['cluster_id'], best_row[metric])
+        
+        # Calculate average of best metrics across concepts
+        if concept_best_metrics:
+            avg_metric = np.mean(concept_best_metrics)
+            
+            if avg_metric > best_avg_metric:
+                best_avg_metric = avg_metric
+                best_percentile = per
+                best_matches_cal = matches_at_this_percentile
+    
+    if best_percentile is None:
+        print("No valid calibration data found!")
+        return {}
+    
+    print(f"Best percentile: {best_percentile} (avg best {metric}={best_avg_metric:.4f})")
+    
+    # Now load TEST data at the single best percentile
+    print(f"\nLoading test data at best percentile {best_percentile}...")
+    test_metrics_path = f'Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{best_percentile}_{con_label}.csv'
+    
+    try:
+        test_df = pd.read_csv(test_metrics_path)
+    except FileNotFoundError:
+        print(f"Error: Missing test file {test_metrics_path}")
+        return {}
+    
+    # Extract all cluster scores for each concept
+    concept_test_scores = defaultdict(list)
+    
+    for idx, row in test_df.iterrows():
+        concept_tuple = ast.literal_eval(row['concept'])
+        gt_concept = concept_tuple[0]
+        cluster_id = str(concept_tuple[1]).strip("'\"")
+        
+        # Filter by requested concepts if specified
+        if gt_concepts_to_show and gt_concept not in gt_concepts_to_show:
+            continue
+            
+        metric_value = row[metric] if metric in row else 0.0
+        
+        if pd.notna(metric_value):
+            concept_test_scores[gt_concept].append({
+                'cluster': cluster_id,
+                metric: metric_value
+            })
+    
+    if not concept_test_scores:
+        print("No concepts found to plot!")
+        return {}
+    
+    print(f"\nPlotting TEST {metric.upper()} distributions for {len(concept_test_scores)} concepts at percentile {best_percentile}...")
+    
+    # Process and plot each concept
+    all_concept_data = {}
+    
+    for concept in sorted(concept_test_scores.keys()):
+        scores_data = concept_test_scores[concept]
+        
+        if not scores_data:
+            print(f"No test scores found for concept: {concept}")
+            continue
+        
+        # Get calibration info for this concept
+        cal_cluster, cal_metric = best_matches_cal.get(concept, ('Unknown', 0))
+        
+        # Convert to list of tuples and sort by metric score
+        cluster_metric_pairs = [(d['cluster'], d[metric]) for d in scores_data]
+        cluster_metric_pairs.sort(key=lambda x: x[1])  # Sort by metric ascending
+        
+        # Apply top_n filter if specified
+        if top_n and len(cluster_metric_pairs) > top_n:
+            cluster_metric_pairs = cluster_metric_pairs[-top_n:]  # Keep top N highest
+            
+        all_concept_data[concept] = cluster_metric_pairs
+        
+        # Create plot
+        fig, ax = plt.subplots(1, 1, figsize=figsize_per_concept)
+        
+        # Extract data for plotting
+        clusters = [x[0] for x in cluster_metric_pairs]
+        metric_scores = [x[1] for x in cluster_metric_pairs]
+        
+        # Create bar plot
+        x_positions = np.arange(len(clusters))
+        bars = ax.bar(x_positions, metric_scores, alpha=0.7)
+        
+        # Color bars by metric score
+        colors = plt.cm.viridis(np.array(metric_scores) / max(metric_scores) if max(metric_scores) > 0 else np.ones_like(metric_scores))
+        for bar, color in zip(bars, colors):
+            bar.set_color(color)
+        
+        # Customize plot
+        title = f"TEST {metric.upper()} Scores for Clusters Aligned with: {concept}"
+        if top_n:
+            title += f" (Top {top_n})"
+        title += f"\n[Best percentile: {best_percentile}, Cal best cluster: {cal_cluster} ({metric}={cal_metric:.3f})]"
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        
+        ax.set_xlabel(f"Cluster Rank (by TEST {metric} score)", fontsize=12)
+        ax.set_ylabel(f"TEST {metric.upper()} Score", fontsize=12)
+        ax.set_ylim(0, 1.05)
+        
+        # Add grid
+        ax.grid(True, axis='y', alpha=0.3)
+        
+        # Add value labels on bars if not too many
+        if len(clusters) <= 30:
+            for i, score in enumerate(metric_scores):
+                ax.text(i, score + 0.01, f"{score:.3f}", ha='center', va='bottom', fontsize=8)
+        
+        # Add statistics
+        if metric_scores:
+            mean_score = np.mean(metric_scores)
+            median_score = np.median(metric_scores)
+            max_score = max(metric_scores)
+            
+            stats_text = f"TEST Stats - Max: {max_score:.3f} | Mean: {mean_score:.3f} | Median: {median_score:.3f}"
+            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                    verticalalignment='top', fontsize=10)
+        
+        plt.tight_layout()
+        
+        # Save if directory specified
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            filename = f"{save_dir}/test_f1_distribution_{concept}_{con_label}.png"
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            print(f"Saved plot to {filename}")
+        
+        plt.show()
+        plt.close()
+    
+    return all_concept_data

@@ -118,18 +118,28 @@ def get_word_from_indices(indices, tokens_list):
     return words
 
 
-def get_top_token_indices_for_concept(cos_sims, tokens_list, concept, dataset_name, top_k=5, split='test'):
+def get_top_token_indices_for_concept(act_loader, tokens_list, concept, dataset_name, top_k=5, split='test', chunk_size=50000):
     """
-    Returns indices of tokens with the highest cosine similarity to the given concept.
+    Returns indices of tokens with the highest activation for the given concept.
 
     Args:
-        cos_sims (pd.DataFrame): DataFrame with rows as tokens, columns as concept names.
-        concept (str): Concept column to search by.
-        top_k (int): Number of top tokens to return.
+        act_loader: ChunkedActivationLoader instance
+        tokens_list: List of tokenized sentences
+        concept (str): Concept column to search by
+        dataset_name (str): Dataset name
+        top_k (int): Number of top tokens to return
+        split (str): 'train', 'test', or 'both'
+        chunk_size (int): Size of chunks to process at once
 
     Returns:
         List of indices (or a single index if top_k=1).
     """
+    import heapq
+    
+    # Get concept column index
+    concept_idx = act_loader.get_concept_index(concept)
+    
+    # Determine valid token indices based on split
     if split != 'both':
         # Step 1: Load split info
         split_df = get_split_df(dataset_name)
@@ -138,21 +148,49 @@ def get_top_token_indices_for_concept(cos_sims, tokens_list, concept, dataset_na
         valid_sentence_indices = split_df[split_df == split].index.tolist()
 
         # Step 3: Convert sentence-level mask to token-level indices
-        valid_token_indices = []
+        valid_token_indices = set()
         idx = 0
         for i, tokens in enumerate(tokens_list):
             if i in valid_sentence_indices:
-                valid_token_indices.extend(list(range(idx, idx + len(tokens))))
+                valid_token_indices.update(range(idx, idx + len(tokens)))
             idx += len(tokens)
-
-        # Step 4: Filter cos_sims to valid tokens only
-        filtered = cos_sims.loc[valid_token_indices]
-        top_indices = filtered[concept].nlargest(top_k).index
     else:
-        # No filtering — just use all tokens
-        top_indices = cos_sims[concept].nlargest(top_k).index
-
-    return top_indices.tolist() if top_k > 1 else top_indices[0]
+        valid_token_indices = None  # All indices are valid
+    
+    # Use a min heap to track top k values
+    top_k_heap = []
+    
+    # Process data in chunks
+    for chunk_start in range(0, len(act_loader), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(act_loader))
+        
+        # Load chunk
+        chunk_tensor = act_loader.load_tensor_range(chunk_start, chunk_end)
+        concept_acts = chunk_tensor[:, concept_idx]
+        
+        # Process each activation in the chunk
+        for i, activation in enumerate(concept_acts):
+            global_idx = chunk_start + i
+            
+            # Skip if not in valid split
+            if valid_token_indices is not None and global_idx not in valid_token_indices:
+                continue
+            
+            # Use negative activation for min heap (to get max values)
+            if len(top_k_heap) < top_k:
+                heapq.heappush(top_k_heap, (activation.item(), global_idx))
+            elif activation > top_k_heap[0][0]:
+                heapq.heapreplace(top_k_heap, (activation.item(), global_idx))
+        
+        # Clean up
+        del chunk_tensor, concept_acts
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    # Extract indices from heap and sort by activation (descending)
+    top_items = sorted(top_k_heap, key=lambda x: x[0], reverse=True)
+    top_indices = [item[1] for item in top_items]
+    
+    return top_indices if top_k > 1 else top_indices[0] if top_indices else None
 
 
 def user_select_concept(concepts):
@@ -179,53 +217,76 @@ def get_sentence_category(sentence_idx, dataset_name):
         return str(metadata['sarcasm'].loc[sentence_idx])
 
 
-def get_sentences_by_metric(cos_sims, tokens_list, dataset_name, concept=None, top_k=5, top=True, aggr_method='avg', split='test'):
+def get_sentences_by_metric(act_loader, tokens_list, dataset_name, concept=None, top_k=5, top=True, aggr_method='avg', split='test'):
     """
     Finds the top-k sentences with the highest or lowest aggregate similarity to a given concept,
     filtered by the dataset split ('train' or 'test').
 
     Args:
-        concept (str): Concept column in cos_sims.
-        cos_sims (pd.DataFrame): DataFrame where rows = flattened tokens, cols = concept names.
-        tokens_list (List[List[str]]): List of tokenized sentences.
-        dataset_name (str): Name of dataset to load split info from.
-        top_k (int): Number of top sentences to return.
-        top (bool): Whether to return top-k (True) or bottom-k (False).
-        aggr_method (str): Aggregation method: 'avg', 'max', or 'min'.
-        split (str): 'train' or 'test'.
+        act_loader: ChunkedActivationLoader instance
+        tokens_list (List[List[str]]): List of tokenized sentences
+        dataset_name (str): Name of dataset to load split info from
+        concept (str): Concept column name
+        top_k (int): Number of top sentences to return
+        top (bool): Whether to return top-k (True) or bottom-k (False)
+        aggr_method (str): Aggregation method: 'avg', 'max', or 'min'
+        split (str): 'train', 'test', or 'both'
 
     Returns:
         List of (sentence_index, score)
     """
-    similarities = cos_sims[concept].to_numpy()
+    # Get concept column index
+    concept_idx = act_loader.get_concept_index(concept)
     
+    # Load split info
+    split_df = get_split_df(dataset_name)
+    if split.lower() in ['train', 'test']:
+        valid_indices = set(split_df[split_df == split].index.tolist())
+    else:
+        valid_indices = None
+    
+    # Collect all sentence scores first (for debugging and correctness)
     sentence_scores = []
-    idx = 0
-    for i, tokens in enumerate(tokens_list):
-        n = len(tokens)
-        sentence_sim = similarities[idx:idx + n]
+    
+    # Process sentences and compute aggregated scores
+    token_offset = 0
+    for sent_idx, tokens in enumerate(tokens_list):
+        n_tokens = len(tokens)
+        
+        # Skip if not in valid split
+        if valid_indices is not None and sent_idx not in valid_indices:
+            token_offset += n_tokens
+            continue
+        
+        if n_tokens == 0:
+            token_offset += n_tokens
+            continue
+        
+        # Load activations for this sentence's tokens
+        sentence_acts = act_loader.load_tensor_range(token_offset, token_offset + n_tokens)
+        concept_acts = sentence_acts[:, concept_idx].cpu().numpy()
+        
+        # Compute aggregated metric
         if aggr_method == 'avg':
-            metric = np.mean(sentence_sim) if n > 0 else float('-inf')
+            metric = np.mean(concept_acts)
         elif aggr_method == 'max':
-            metric = np.max(sentence_sim) if n > 0 else float('-inf')
+            metric = np.max(concept_acts)
         elif aggr_method == 'min':
-            metric = np.min(sentence_sim) if n > 0 else float('inf')
+            metric = np.min(concept_acts)
         else:
             raise ValueError(f"Invalid aggregation method: {aggr_method}")
-        sentence_scores.append((i, metric))
-        idx += n
-
-    # Step 1: Load split info
-    split_df = get_split_df(dataset_name)
-
-    # Step 2: Filter sentence indices by split, if not 'both'
-    if split.lower() in ['train', 'test']:
-        valid_indices = split_df[split_df == split].index.tolist()
-        sentence_scores = [x for x in sentence_scores if x[0] in valid_indices]
-
-    # Step 3: Sort and return top_k
-    sorted_scores = sorted(sentence_scores, key=lambda x: -x[1] if top else x[1])
-    return sorted_scores[:top_k]
+        
+        sentence_scores.append((sent_idx, metric))
+        
+        token_offset += n_tokens
+        
+        # Clean up
+        del sentence_acts, concept_acts
+    
+    # Sort all scores and return top k
+    sentence_scores.sort(key=lambda x: -x[1] if top else x[1])
+    
+    return sentence_scores[:top_k]
 
 
 
@@ -359,52 +420,96 @@ def highlight_tokens_with_legend(tokens, scores, cmap_name="coolwarm", vmin=None
     return HTML(html_block)
 
 
-def plot_most_aligned_tokens(cos_sims, tokens_list, dataset_name, concept=None, top_k=5):
+def plot_most_aligned_tokens(act_loader, tokens_list, dataset_name, concept=None, top_k=5):
+    """
+    Plot the most aligned tokens for a concept using act_loader.
+    
+    Args:
+        act_loader: ChunkedActivationLoader instance
+        tokens_list: List of tokenized sentences
+        dataset_name: Name of dataset
+        concept: Concept to visualize (optional)
+        top_k: Number of top tokens to show
+    """
     # Step 1: If no concept is passed, prompt the user
     if concept is None:
-        concept = user_select_concept(cos_sims.columns)
+        concept = user_select_concept(act_loader.columns)
 
     # Step 2: Get top token indices
-    top_token_indices = get_top_token_indices_for_concept(cos_sims, tokens_list, concept, dataset_name, top_k)
+    top_token_indices = get_top_token_indices_for_concept(act_loader, tokens_list, concept, dataset_name, top_k)
     
     # Step 3: Map token indices back to token strings
     top_tokens = get_word_from_indices(top_token_indices, tokens_list)
     
-    # Step 4: Plot tokens with similarity scores
-    display(highlight_tokens_with_legend(top_tokens, cos_sims[concept].iloc[top_token_indices], vmin=0))
+    # Step 4: Get the activation scores for these indices
+    concept_acts = act_loader.load_concept_activations_for_indices(concept, top_token_indices)
+    
+    # Step 5: Plot tokens with similarity scores
+    display(highlight_tokens_with_legend(top_tokens, concept_acts.cpu().numpy(), vmin=0))
     
     
-def plot_most_aligned_sentences(cos_sims, all_texts, dataset_name, concept=None, top_k=5, split='test'):
+def plot_most_aligned_sentences(act_loader, all_texts, dataset_name, concept=None, top_k=5, split='test'):
     """
     Plots the top-k most aligned sentences (CLS embeddings) for a given concept.
 
     Args:
-        cos_sims (pd.DataFrame): DataFrame with rows as sentences, columns as concepts.
-        all_texts (List[str]): Original sentences, aligned row-wise with `cos_sims`.
-        dataset_name (str): Dataset name for loading split info.
-        concept (str): Concept to visualize.
-        top_k (int): Number of top aligned sentences to return.
+        act_loader: ChunkedActivationLoader instance
+        all_texts (List[str]): Original sentences, aligned row-wise with activations
+        dataset_name (str): Dataset name for loading split info
+        concept (str): Concept to visualize
+        top_k (int): Number of top aligned sentences to return
         split (str): One of 'train', 'test', 'cal', or 'both'
     """
     # Step 1: Choose concept if not passed
     if concept is None:
-        concept = user_select_concept(cos_sims.columns)
+        concept = user_select_concept(act_loader.columns)
 
-    # Step 2: Filter by split
+    # Step 2: Get concept column index
+    concept_idx = act_loader.get_concept_index(concept)
+    
+    # Step 3: Filter by split
     if split != 'both':
         split_df = get_split_df(dataset_name)
-        valid_indices = split_df[split_df == split].index
-        filtered_scores = cos_sims.loc[valid_indices, concept]
+        valid_indices = split_df[split_df == split].index.tolist()
     else:
-        filtered_scores = cos_sims[concept]
-
-    # Step 3: Get top-k sentence indices
-    top_sentence_indices = filtered_scores.nlargest(top_k).index.tolist()
-
-    # Step 4: Display sentences and scores
+        valid_indices = None
+    
+    # Step 4: Find top-k sentences
+    import heapq
+    top_k_heap = []
+    chunk_size = 10000
+    
+    for chunk_start in range(0, len(act_loader), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(act_loader))
+        
+        # Load chunk
+        chunk_tensor = act_loader.load_tensor_range(chunk_start, chunk_end)
+        concept_acts = chunk_tensor[:, concept_idx]
+        
+        # Process each activation in the chunk
+        for i, activation in enumerate(concept_acts):
+            global_idx = chunk_start + i
+            
+            # Skip if not in valid split
+            if valid_indices is not None and global_idx not in valid_indices:
+                continue
+            
+            # Use min heap to track top k values
+            if len(top_k_heap) < top_k:
+                heapq.heappush(top_k_heap, (activation.item(), global_idx))
+            elif activation > top_k_heap[0][0]:
+                heapq.heapreplace(top_k_heap, (activation.item(), global_idx))
+        
+        # Clean up
+        del chunk_tensor, concept_acts
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    # Step 5: Extract and sort results
+    top_items = sorted(top_k_heap, key=lambda x: x[0], reverse=True)
+    
+    # Step 6: Display sentences and scores
     print(f"\nTop {top_k} sentences most aligned with concept '{concept}':\n")
-    for rank, idx in enumerate(top_sentence_indices):
-        score = cos_sims.loc[idx, concept]
+    for rank, (score, idx) in enumerate(top_items):
         sentence = all_texts[idx]
         print(f"[{rank+1}] Score: {score:.4f}")
         print(f"     {sentence}\n")
@@ -412,32 +517,38 @@ def plot_most_aligned_sentences(cos_sims, all_texts, dataset_name, concept=None,
 
 
 def plot_tokens_in_context_byconcept(
-    cos_sims,
+    act_loader,
     tokens_list,
     dataset_name,
     concept=None,
     top_k=5,
     top=True,
     aggr_method='avg',
-    cmap_name="coolwarm"
+    cmap_name="coolwarm",
+    split='test'
 ):
     is_sentence_level = dataset_name == "Stanford-Tree-Bank"
     unit_type = "sentence" if is_sentence_level else "paragraph"
 
     if concept is None:
-        concept = user_select_concept(cos_sims.columns)
+        concept = user_select_concept(act_loader.columns)
 
-    samples = get_sentences_by_metric(cos_sims, tokens_list, dataset_name, concept, top_k, top, aggr_method)
+    samples = get_sentences_by_metric(act_loader, tokens_list, dataset_name, concept, top_k, top, aggr_method, split)
 
     if top:
         print(f"\nPlotting {unit_type}s MOST activated by {concept} ({aggr_method} over tokens)\n")
     else:
         print(f"\nPlotting {unit_type}s LEAST activated by {concept} ({aggr_method} over tokens)\n")
 
+    # Get concept column index
+    concept_idx = act_loader.get_concept_index(concept)
+    
+    # Collect all scores to determine color scale
     all_scores = []
     for idx, _ in samples:
         start_idx, end_idx = get_glob_tok_indices_from_sent_idx(idx, tokens_list)
-        all_scores.extend(cos_sims[concept].iloc[start_idx:end_idx].tolist())
+        sentence_acts = act_loader.load_tensor_range(start_idx, end_idx)
+        all_scores.extend(sentence_acts[:, concept_idx].cpu().numpy().tolist())
     vmin, vmax = min(all_scores), max(all_scores)
 
     html_blocks = []
@@ -445,7 +556,10 @@ def plot_tokens_in_context_byconcept(
         category = get_sentence_category(idx, dataset_name)
         start_idx, end_idx = get_glob_tok_indices_from_sent_idx(idx, tokens_list)
         tokens = tokens_list[idx]
-        sims = cos_sims[concept].iloc[start_idx:end_idx].tolist()
+        
+        # Load activations for this sentence
+        sentence_acts = act_loader.load_tensor_range(start_idx, end_idx)
+        sims = sentence_acts[:, concept_idx].cpu().numpy().tolist()
 
         # Title for each text unit with its concept score
         title = f"<h4>Rank {i+1} : {unit_type.capitalize()} {idx} -- {category.capitalize()} ({aggr_method}={metric:.2f})</h4>"
@@ -467,7 +581,7 @@ def plot_tokens_in_context_byconcept(
 
 def plot_all_concept_activations_on_sentence(
     sentence_idx,
-    cos_sims,
+    act_loader,
     tokens_list,
     dataset_name,
     cmap_name="coolwarm",
@@ -480,14 +594,17 @@ def plot_all_concept_activations_on_sentence(
     def clean_token(token):
         return token.replace("Ġ", "")  # Strip GPT/RoBERTa word boundary marker
 
-    concepts = cos_sims.columns.tolist()
+    concepts = act_loader.columns
     raw_tokens = tokens_list[sentence_idx]
     tokens = [clean_token(tok) for tok in raw_tokens]
     start_idx, end_idx = get_glob_tok_indices_from_sent_idx(sentence_idx, tokens_list)
 
+    # Load activations for this sentence
+    sentence_acts = act_loader.load_tensor_range(start_idx, end_idx).cpu().numpy()
+    
     # Get per-concept similarity scores for this sentence
     sims_per_concept = {
-        concept: cos_sims[concept].iloc[start_idx:end_idx].tolist()
+        concept: sentence_acts[:, act_loader.get_concept_index(concept)].tolist()
         for concept in concepts
     }
 
@@ -538,7 +655,7 @@ def plot_all_concept_activations_on_sentence(
 
 
 def plot_tokens_by_activation_and_gt(
-    cos_sims,
+    act_loader,
     tokens_list,
     dataset_name,
     model_input_size,
@@ -551,13 +668,13 @@ def plot_tokens_by_activation_and_gt(
     maximum token activations, split by ground truth labels. Only includes paragraphs from the test split.
     
     Args:
-        cos_sims (pd.DataFrame): DataFrame with rows as flattened tokens, cols as concept names.
-        tokens_list (List[List[str]]): List of tokenized sentences.
-        dataset_name (str): Name of dataset.
-        model_input_size (tuple): Model input size for loading GT samples.
-        concept (str): Concept to visualize.
-        n_examples (int): Number of examples per category (default: 3).
-        cmap_name (str): Colormap name for visualization.
+        act_loader: ChunkedActivationLoader instance
+        tokens_list (List[List[str]]): List of tokenized sentences
+        dataset_name (str): Name of dataset
+        model_input_size (tuple): Model input size for loading GT samples
+        concept (str): Concept to visualize
+        n_examples (int): Number of examples per category (default: 3)
+        cmap_name (str): Colormap name for visualization
     """
     # Import needed functions
     from collections import defaultdict
@@ -565,7 +682,10 @@ def plot_tokens_by_activation_and_gt(
     
     # Select concept if not provided
     if concept is None:
-        concept = user_select_concept(cos_sims.columns)
+        concept = user_select_concept(act_loader.columns)
+    
+    # Get concept column index
+    concept_idx = act_loader.get_concept_index(concept)
     
     # Load ground truth token indices (patches for text datasets)
     gt_path = f'GT_Samples/{dataset_name}/gt_patches_per_concept_inputsize_{model_input_size}.pt'
@@ -593,8 +713,9 @@ def plot_tokens_by_activation_and_gt(
             end_idx = idx + len(tokens)
             
             # Get activations for all tokens in this paragraph
-            paragraph_sims = cos_sims[concept].iloc[start_idx:end_idx]
-            max_activation = paragraph_sims.max()
+            paragraph_acts = act_loader.load_tensor_range(start_idx, end_idx)
+            concept_acts = paragraph_acts[:, concept_idx].cpu().numpy()
+            max_activation = concept_acts.max()
             
             # Check if any token in this paragraph is GT
             paragraph_token_indices = list(range(start_idx, end_idx))
@@ -648,7 +769,8 @@ def plot_tokens_by_activation_and_gt(
         for paragraph in category_paragraphs:
             sent_idx = paragraph['sent_idx']
             start_idx, end_idx = get_glob_tok_indices_from_sent_idx(sent_idx, tokens_list)
-            all_scores.extend(cos_sims[concept].iloc[start_idx:end_idx].tolist())
+            paragraph_acts = act_loader.load_tensor_range(start_idx, end_idx)
+            all_scores.extend(paragraph_acts[:, concept_idx].cpu().numpy().tolist())
     
     if all_scores:
         vmin, vmax = min(all_scores), max(all_scores)
@@ -668,7 +790,8 @@ def plot_tokens_by_activation_and_gt(
                 start_idx, end_idx = get_glob_tok_indices_from_sent_idx(sent_idx, tokens_list)
                 
                 tokens = tokens_list[sent_idx]
-                sims = cos_sims[concept].iloc[start_idx:end_idx].tolist()
+                paragraph_acts = act_loader.load_tensor_range(start_idx, end_idx)
+                sims = paragraph_acts[:, concept_idx].cpu().numpy().tolist()
                 
                 # Find which token has the max activation
                 max_token_idx = np.argmax(sims)

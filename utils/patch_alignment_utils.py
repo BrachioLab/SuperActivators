@@ -16,7 +16,7 @@ import os
 # importlib.reload(utils)
 # importlib.reload(compute_concepts_utils)
 
-from utils.general_utils import retrieve_image, get_resized_dims_w_same_ar, pad_or_resize_img
+from utils.general_utils import retrieve_image, get_resized_dims_w_same_ar, pad_or_resize_img, create_image_loader_function
 # from visualize_concepts_w_samples_utils import plot_patches_sim_to_vector
 
 ############ For Reasoning About Patch Indices #################
@@ -163,7 +163,7 @@ def get_patch_split_df(dataset_name, model_input_size, patch_size=14):
         pd.DataFrame: A new DataFrame where each patch has its own row and inherits the split from the image.
     """
     per_sample_metadata_df = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
-    if 'text' not in model_input_size:
+    if not isinstance(model_input_size, tuple) or 'text' not in model_input_size:
         split_df = per_sample_metadata_df['split']
 
 
@@ -178,7 +178,6 @@ def get_patch_split_df(dataset_name, model_input_size, patch_size=14):
         
         import os
         if os.path.exists(model_specific_tokens_file):
-            print(f"   📄 Loading model-specific tokens: {model_specific_tokens_file}")
             token_lists = torch.load(model_specific_tokens_file, weights_only=False)
         else:
             print(f"   ⚠️  Model-specific tokens not found, using generic: {generic_tokens_file}")
@@ -273,26 +272,29 @@ def get_dataset_patch_mask(model_input_size, original_sizes, tot_num_patches, da
 
 def filter_patches_by_image_presence(indices, dataset_name, model_input_size):
     patch_mask = torch.load(f'GT_Samples/{dataset_name}/patches_w_image_mask_inputsize_{model_input_size}.pt', weights_only=False)
+    
     # Convert the mask to a list of integers if needed
     mask_list = patch_mask.tolist()
+    
     # Filter indices using a list comprehension
-    filtered_indices = [idx for idx, m in zip(indices, mask_list) if m == 1]
-    return torch.tensor(filtered_indices)
+    filtered_indices = [idx for idx in indices if mask_list[idx] == 1]
+    
+    result = torch.tensor(filtered_indices)
+    
+    return result
     
 
 ############# Visualize patch similarities to vectors #############
-def compute_patch_similarities_to_vector(image_index, concept_label, images, embeddings,
+def compute_patch_similarities_to_vector(image_index, concept_label,
                                       cossims, dataset_name='CLEVR', patch_size=14, model_input_size=(224, 224),
                                       save_path=None, heatmap_path=None, show_plot=False):
     """
     Computes a heatmap of cosine similarities between a target vector and all patches in a given image.
 
     Args:
-        image_index (int): The index of the image in the list of images.
+        image_index (int): The index of the image to process.
         concept_label (str): The name of the concept to be visualized.
-        images (list of PIL.Image): A list of images.
-        embeddings (torch.tensor): Patch embeddings for the dataset.
-        cossims (pd.DataFrame): File containing precomputed cosine similarities for each patch and concept.
+        cossims (ChunkedActivationLoader): Loader containing precomputed cosine similarities for each patch and concept.
         dataset_name (str): The name of the dataset. Defaults to 'CLEVR'.
         patch_size (int): The size of the patches into which the image is divided. Defaults to 14.
         model_input_size (tuple): The dimensions (width, height) to which the image is resized for model input.
@@ -301,7 +303,7 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
         heatmap_path (str, optional): Path to save the heatmap tensor. If None, the plot is not saved.
 
     Returns:
-        matplotlib.figure.Figure: The heatmap figure showing cosine similarity overlayed on the image.
+        torch.Tensor: The heatmap tensor showing cosine similarity for each patch.
 
     Notes:
         - If a heatmap plot already exists at the specified save path, it will be loaded and displayed.
@@ -316,9 +318,9 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
     #     except:
     #         os.remove(heatmap_path) #delete incomplete halfway saved heatmap
 
-    # Process the image
-    image = images[image_index]
-    resized_image = image.resize(model_input_size)
+    # Load the specific image using retrieve_image
+    image = retrieve_image(image_index, dataset_name)
+    resized_image = pad_or_resize_img(image, model_input_size)
 
     # Calculate patch indices
     patches_per_row, patches_per_col, _ = calculate_patch_indices(
@@ -330,8 +332,18 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
     # end_patch_index = start_patch_index + (patches_per_row * patches_per_col)
     start_patch_index, end_patch_index = get_patch_range_for_image(image_index, patch_size=patch_size, model_input_size=model_input_size)
     # Compute cosine similarities between the target vector and all patches
-    concept_cos_sims = cossims[concept_label].to_numpy()
-    curr_image_cos_sims = concept_cos_sims[start_patch_index:end_patch_index]
+    # Handle both DataFrame and ChunkedActivationLoader
+    # Get cosine similarities using the loader
+    if hasattr(cossims, 'load_concept_range'):
+        # ChunkedActivationLoader method
+        df = cossims.load_concept_range(
+            concept_names=[str(concept_label)], 
+            start_idx=start_patch_index, 
+            end_idx=end_patch_index
+        )
+        curr_image_cos_sims = df[str(concept_label)].values
+    else:
+        raise ValueError("cossims must be a ChunkedActivationLoader with load_concept_range method")
     
     # Reshape similarities to match the patch grid
     cos_sim_grid = curr_image_cos_sims.reshape(patches_per_col, patches_per_row)
@@ -343,18 +355,18 @@ def compute_patch_similarities_to_vector(image_index, concept_label, images, emb
     
     return heatmap
 
-def compute_heatmaps_for_concept(concept_label, my_image_indices, images, embeds, cos_sims, dataset_name, con_label, top_n, model_input_size):
+def compute_heatmaps_for_concept(concept_label, my_image_indices, cos_sims, dataset_name, con_label, top_n, model_input_size):
     """
     Computes heatmaps for a given concept by calculating patch similarities across specified images.
 
     Args:
         concept_label (str): The label of the concept for which heatmaps are generated.
         my_image_indices (list): A list of indices representing the images to process.
-        images (list): A list of images corresponding to the embeddings.
-        embeds (torch.Tensor): A tensor of embeddings for the patches of the images.
-        cos_sims (torch.Tensor): A tensor of cosine similarity values for the patches.
+        cos_sims (ChunkedActivationLoader): Loader containing cosine similarity values for the patches.
         dataset_name (str): The name of the dataset (used for saving the heatmaps).
         con_label (str): A label or identifier for the concept, typically used in filenames.
+        top_n (int): Number of top images (unused in this function but kept for compatibility).
+        model_input_size (tuple): The model input size.
 
     Returns:
         dict: A dictionary where keys are image indices and values are the corresponding heatmaps.
@@ -363,8 +375,8 @@ def compute_heatmaps_for_concept(concept_label, my_image_indices, images, embeds
     for image_index in my_image_indices:
             heatmap_path = f'Heatmaps/{dataset_name}/patchsim_concept_{concept_label}_img_{image_index}_heatmaptype_avgsim_model__{con_label}'
             heatmap = compute_patch_similarities_to_vector(image_index=image_index, concept_label=str(concept_label), 
-                                              images=images, embeddings=embeds,  cossims=cos_sims,
-                                              dataset_name='CLEVR', patch_size=14, model_input_size=model_input_size,
+                                              cossims=cos_sims,
+                                              dataset_name=dataset_name, patch_size=14, model_input_size=model_input_size,
                                               save_path=None,
                                               heatmap_path=heatmap_path)
             heatmaps[image_index] = heatmap

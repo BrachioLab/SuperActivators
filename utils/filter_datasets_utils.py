@@ -35,7 +35,9 @@ DATASET_TO_CONCEPTS = {
         'shape::cube', 'shape::cylinder', 'shape::sphere'
     ],
     'Sarcasm': ['sarcasm'],
-    'iSarcasm': ['sarcasm', 'sarcastic'],
+    # 'iSarcasm': ['sarcasm', 'sarcastic'],
+    'iSarcasm': ['sarcastic'],
+    'GoEmotions': ['confusion', 'joy', 'sadness', 'anger', 'love', 'caring', 'optimism', 'amusement', 'curiosity', 'disapproval', 'approval', 'annoyance', 'gratitude', 'admiration']
 }
 
 def filter_concept_dict(concept_dict, dataset_name):

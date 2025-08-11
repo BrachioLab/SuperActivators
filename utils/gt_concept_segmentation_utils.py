@@ -21,8 +21,78 @@ import utils.patch_alignment_utils
 importlib.reload(utils.patch_alignment_utils)
 from utils.general_utils import load_images, retrieve_present_concepts, pad_or_resize_img_tensor, filter_coco_concepts, get_split_df
 from utils.patch_alignment_utils import get_image_idx_from_global_patch_idx, get_patch_split_df
+from typing import Dict, List, Set
 
 ### all-dataset purpose ###
+
+def remap_text_ground_truth_indices(gt_indices: Set[int], dataset_name: str, split: str = 'test', model_input_size=None) -> Set[int]:
+    """
+    Remap ground truth indices from global token indices to split-specific indices.
+    
+    For text datasets, ground truth indices are stored as global token indices across
+    the entire dataset. However, when we load a specific split (cal/train/test), the
+    tokens are renumbered starting from 0. This function maps the global indices to
+    split-specific indices.
+    
+    Args:
+        gt_indices: Set of global token indices
+        dataset_name: Name of the dataset
+        split: Which split to map to ('cal', 'train', or 'test')
+        model_input_size: Tuple specifying model input size, e.g., ('text', 'text') for Llama
+        
+    Returns:
+        Set of remapped indices for the specific split
+    """
+    import glob
+    from utils.general_utils import get_split_df
+    
+    # Load token counts - MUST match the model being used
+    if model_input_size and model_input_size[0] == 'text':
+        token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
+        if not os.path.exists(token_counts_file):
+            raise FileNotFoundError(f"Required token counts file not found: {token_counts_file}. "
+                                  f"This MUST match the model input size {model_input_size}")
+    else:
+        # Fallback for legacy code or non-text models
+        token_files = glob.glob(f'GT_Samples/{dataset_name}/token_counts_inputsize_*.pt')
+        if not token_files:
+            raise FileNotFoundError(f"No token counts file found for {dataset_name}")
+        token_counts_file = token_files[0]
+    token_counts = torch.load(token_counts_file, weights_only=False)
+    
+    # Convert to tokens per sentence
+    tokens_per_sentence = [sum(sent_tokens) if isinstance(sent_tokens, list) else sent_tokens 
+                          for sent_tokens in token_counts]
+    
+    # Get split info - REVERT to original working method
+    split_df = get_split_df(dataset_name)
+    
+    # Calculate cumulative token counts
+    cumulative_tokens = [0]
+    for i in range(len(tokens_per_sentence)):
+        cumulative_tokens.append(cumulative_tokens[-1] + tokens_per_sentence[i])
+    
+    # Get sentences for the target split
+    target_sentences = [i for i in range(len(tokens_per_sentence)) if split_df.get(i) == split]
+    
+    # Build mapping from global token index to split-specific token index
+    global_to_split_idx = {}
+    split_token_idx = 0
+    
+    for sent_idx in target_sentences:
+        global_start = cumulative_tokens[sent_idx]
+        global_end = cumulative_tokens[sent_idx + 1]
+        for global_idx in range(global_start, global_end):
+            global_to_split_idx[global_idx] = split_token_idx
+            split_token_idx += 1
+    
+    # Map the indices
+    remapped_indices = set()
+    for idx in gt_indices:
+        if idx in global_to_split_idx:
+            remapped_indices.add(global_to_split_idx[idx])
+    
+    return remapped_indices
 def plot_seg_maps(dataset_name, input_image_size=(224, 224), img_idx=-1):
     data_dir = f'../Data/{dataset_name}/'
     metadata = pd.read_csv(f'{data_dir}/metadata.csv')

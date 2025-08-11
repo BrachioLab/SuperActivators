@@ -2,19 +2,15 @@
 
 from tqdm import tqdm
 import os
-import csv
 import pandas as pd
 import random
 import numpy as np
 import math
 from collections import defaultdict
 import copy
-from transformers import AutoTokenizer
-from torch.nn.utils.rnn import pad_sequence
 import gc
 import sys
 import json
-from pathlib import Path
 
 sys.path.append(os.path.abspath(".."))
 
@@ -23,21 +19,18 @@ from torchvision import transforms
 from sklearn.metrics import mean_squared_error, f1_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.utils import resample
 from sklearn.metrics.pairwise import cosine_similarity
-import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import wandb
+
 # import cupy as cp 
 # from cuml.cluster import KMeans as cuml_kmeans 
-from fast_pytorch_kmeans import KMeans
+# from fast_pytorch_kmeans import KMeans
 # import faiss
 
 
 import matplotlib.pyplot as plt
-import seaborn as sns
-from PIL import Image, ImageDraw, ImageFont
-from matplotlib.patches import Rectangle
+from PIL import Image
 from IPython.display import display, clear_output
 
 import importlib
@@ -48,858 +41,8 @@ importlib.reload(utils.patch_alignment_utils)
 
 from utils.general_utils import retrieve_image, load_images, get_split_df, create_binary_labels, filter_coco_concepts
 from utils.patch_alignment_utils import get_patch_split_df, filter_patches_by_image_presence
+from utils.embedding_utils import ChunkedEmbeddingDataset
 
-### For Computing Embeddings ###
-def get_final_cls_embeddings(model, processor, images, device):
-    """
-    Extracts class token embeddings at final layer of given model for each image.
-
-    Args:
-        model: The CLIP model to generate embeddings.
-        processor: The processor used for transformifng the images and text.
-        images: A list of PIL.Image objects.
-        device: The device to move the tensors to.
-
-    Returns:
-        torch.Tensor: The generated image embeddings.
-    """
-    # Preprocess the images for the model (passing PIL Images directly)
-    inputs = processor(images=images, return_tensors="pt", padding=True)
-    inputs = inputs.to(device)
-
-    # Generate image embeddings without computing gradients
-    with torch.no_grad():
-        image_features = model.get_image_features(pixel_values=inputs['pixel_values'])  # Extract class token embeddings
-    
-    return image_features
-
-def get_intermediate_representations(model, processor, images, device, percent_thru_model):
-    """
-    Extracts embeddings from chosen layer of given model for each patch and class token in each image.
-
-    Args:
-        model: The CLIP model to generate embeddings.
-        processor: The processor used for transforming the images and text.
-        images: A list of PIL.Image objects.
-        device: The device to move the tensors to.
-        percent_thru_model (int) : For patch concepts, percentage through model intermediate rep is extracted from.
-
-    Returns:
-        torch.Tensor: The generated embeddings per patch per image.
-    """
-    # Extracts embeddings from a specific layer of the CLIP image encoder. (will need to change if you use different model)
-    layer_index = int(len(model.vision_model.encoder.layers) * (percent_thru_model/100)) - 1 
-    layer_output = []
-    
-    def hook(module, input, output):
-        layer_output.append(output)
-    
-    # Register the hook to the specified layer
-    layer = model.vision_model.encoder.layers[layer_index]
-    handle = layer.register_forward_hook(hook)
-    
-    # Preprocess the image and convert it to tensor format
-    processed_images = processor(images=images, return_tensors="pt", padding=True).to(device)
-    
-    # The output of the hook contains the patch embeddings
-    with torch.no_grad():
-        model.get_image_features(pixel_values=processed_images['pixel_values'])
-    all_embeddings = layer_output[0][0]
-    handle.remove()
-    return all_embeddings
-
-def get_clip_cls_embeddings(model, processor, images, device, percent_thru_model):
-    """
-    Extracts class token embeddings at final layer of given model for each image.
-
-    Args:
-        model: The CLIP model to generate embeddings.
-        percent_thru_model (int): Percent through model that embeddings are taken from.
-        processor: The processor used for transforming the images and text.
-        images: A list of PIL.Image objects.
-        device: The device to move the tensors to.
-        percent_thru_model (int): Percent through model that embedding is extracted from.
-
-    Returns:
-        torch.Tensor: The generated image embeddings.
-    """
-    # if percent_thru_model == 100:
-    #     return get_final_cls_embeddings(model, processor, images, device)
-    # else:
-    all_embeddings = get_intermediate_representations(model, processor, images, device, percent_thru_model)
-    #remove class token
-    cls_embeddings = all_embeddings[:, 0, :]
-    return cls_embeddings
-
-def get_clip_patch_embeddings(model, processor, images, device, percent_thru_model):
-    """
-    Extracts embeddings from chosen layer of given model for each patch in each image.
-
-    Args:
-        model: The CLIP model to generate embeddings.
-        processor: The processor used for transforming the images and text.
-        images: A list of PIL.Image objects.
-        device: The device to move the tensors to.
-        percent_thru_model (int) : For patch concepts, percentage through model intermediate rep is extracted from.
-
-    Returns:
-        torch.Tensor: The generated embeddings per patch per image.
-    """
-    all_embeddings = get_intermediate_representations(model, processor, images, device, percent_thru_model)
-   
-    #remove class token
-    patch_embeddings = all_embeddings[:, 1:, :]
-    
-    #flatten image dimension so its (n_patches, embed_dim)
-    patch_embeddings = patch_embeddings.reshape(-1, patch_embeddings.size(-1))
-    
-    return patch_embeddings
-
-
-def get_llama_cls_embeddings(model, processor, images, device, percent_thru_model=100):
-    """
-    Extracts llama cls embeddings for each image WITHOUT using the projector.
-    
-    NOTE: This returns embeddings from the last layer of the vision model (1280-dim)
-    instead of projecting them to the language model space (4096-dim).
-
-    Args:
-        model: The LLAMA model to generate embeddings.
-        processor: The processor used for transforming the images and text.
-        images: A list of PIL.Image objects.
-        device: The device to move the tensors to.
-        percent_thru_model (int) : Not used, for now
-    Returns:
-        torch.Tensor: The generated embeddings per patch per image.
-    """
-    inputs = processor(images,
-                        add_special_tokens=False,
-                        return_tensors="pt").to(device)
-    
-    #get embeddings from vision model
-    with torch.no_grad():
-        vision_outputs = model.vision_model(
-            pixel_values=inputs["pixel_values"],
-            aspect_ratio_ids=inputs["aspect_ratio_ids"],
-            aspect_ratio_mask=inputs["aspect_ratio_mask"],
-            output_hidden_states=False,
-            output_attentions=False,
-            return_dict=True
-        )
-        # Use the raw vision outputs WITHOUT projecting them
-        cross_attention_states = vision_outputs[0]
-    
-    # Initialize storage for embeddings (excluding the class token)
-    all_embs = []
-    for i in range(0, len(images) * 4, 4):  # Only look at first tile
-        curr_emb = cross_attention_states[i, :, :]  
-        embs_no_cls = curr_emb[0, :]  # just get the first token (cls token)
-        all_embs.append(embs_no_cls) 
-
-    # Stack collected embeddings into a single tensor
-    cls_embeddings = torch.stack(all_embs)
-    
-    return cls_embeddings
-
-
-def get_llama_patch_embeddings(model, processor, images, device, percent_thru_model=100):
-    """
-    Extracts llama patch embeddings for each image WITHOUT using the projector.
-    
-    NOTE: This returns embeddings from the last layer of the vision model (1280-dim)
-    instead of projecting them to the language model space (4096-dim).
-
-    Args:
-        model: The LLAMA model to generate embeddings.
-        processor: The processor used for transforming the images and text.
-        images: A list of PIL.Image objects.
-        device: The device to move the tensors to.
-        percent_thru_model (int) : Not used, for now
-    Returns:
-        torch.Tensor: The generated embeddings per patch per image.
-    """
-    inputs = processor(images,
-                        add_special_tokens=False,
-                        return_tensors="pt").to(device)
-    
-    #get embeddings from vision model
-    with torch.no_grad():
-        vision_outputs = model.vision_model(
-            pixel_values=inputs["pixel_values"],
-            aspect_ratio_ids=inputs["aspect_ratio_ids"],
-            aspect_ratio_mask=inputs["aspect_ratio_mask"],
-            output_hidden_states=False,
-            output_attentions=False,
-            return_dict=True
-        )
-        # Use the raw vision outputs WITHOUT projecting them
-        cross_attention_states = vision_outputs[0] #get last hidden state
-    
-    # Initialize storage for embeddings (excluding the class token)
-    all_embs = []
-    for i in range(0, len(images) * 4, 4):  # Only look at first tile
-        curr_emb = cross_attention_states[i, :, :]  
-        embs_no_cls = curr_emb[1:, :]  # Exclude the first token (cls token)
-        all_embs.append(embs_no_cls) 
-
-    # Stack collected embeddings into a single tensor
-    patch_embeddings = torch.stack(all_embs)
-    patch_embeddings = patch_embeddings.reshape(-1, patch_embeddings.shape[2]) #flatten so each patch is own dim
-    
-    return patch_embeddings
-
-
-# def get_llama_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-#     """
-#     Extracts embeddings from chosen layer of given model for each patch in each image.
-
-#     Args:
-#         model: The LLAMA model to generate embeddings.
-#         processor: The processor used for transforming the images and text.
-#         text_samples: A list of text strings.
-#         device: The device to move the tensors to.
-#         percent_thru_model (int) : Not used, for now
-#     Returns:
-#         torch.Tensor: The generated embeddings per patch per image.
-#     """
-#     hidden_states_list = []
-#     with torch.no_grad():
-#         for text_sample in text_samples: #do one by one so special tokens consistent w different batch sizes
-#             inputs = processor.tokenizer(
-#                 text_sample,
-#                 add_special_tokens=False,
-#                 padding=False,
-#                 return_tensors="pt"
-#             ).to(model.device)
-
-#             outputs = model(
-#                 **inputs,
-#                 output_hidden_states=True,
-#                 return_dict=True
-#             )
-
-#             hidden_states = outputs.hidden_states
-#             hidden = hidden_states[-1].squeeze() #just get hidden state from last layer  
-#             hidden_states_list.append(hidden)
-
-#     hidden_states = torch.cat(hidden_states_list, dim=0)
-#     return hidden_states
-
-
-# def get_llama_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-#     """
-#     Extracts mean pooled token embeddings from the LLaMA model for each text sample.
-
-#     Args:
-#         model: The LLaMA model (e.g., LlamaForCausalLM).
-#         processor: The processor used for tokenization.
-#         text_samples: A list of text strings.
-#         device: Device for model execution.
-#         percent_thru_model: Not used.
-
-#     Returns:
-#         torch.Tensor: Mean pooled embeddings per text sample.
-#     """
-#     mean_embeddings = []
-#     with torch.no_grad():
-#         for text_sample in text_samples:
-#             inputs = processor(
-#                 text=text_sample,
-#                 add_special_tokens=False,
-#                 padding=False,
-#                 return_tensors="pt"
-#             ).to(device)
-
-#             outputs = model(
-#                 **inputs,
-#                 output_hidden_states=True,
-#                 return_dict=True
-#             )
-
-#             last_hidden = outputs.hidden_states[-1]  # (1, seq_len, hidden_dim)
-#             mean_emb = last_hidden.mean(dim=1)       # (1, hidden_dim)
-#             mean_embeddings.append(mean_emb)
-
-#     return torch.cat(mean_embeddings, dim=0)  # (n_samples, hidden_dim)
-
-
-def get_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-    """
-    Extracts embeddings from chosen layer of given model for each token in each text sample.
-
-    Args:
-        model: The language model to generate embeddings (e.g., Llama, Mistral).
-        processor: The processor used for tokenization.
-        text_samples: A list of text strings.
-        device: The device to move the tensors to.
-        percent_thru_model (int) : Not used, for now
-    Returns:
-        torch.Tensor: The generated embeddings per token per text sample.
-    """
-    hidden_states_list = []
-    # Determine if processor has a tokenizer attribute (Llama) or is itself a tokenizer (Mistral)
-    tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
-    
-    with torch.no_grad():
-        for text_sample in text_samples: #do one by one so special tokens consistent w different batch sizes
-            inputs = tokenizer(
-                text_sample,
-                add_special_tokens=False,
-                padding=False,
-                return_tensors="pt"
-            ).to(model.device)
-
-            outputs = model(
-                **inputs,
-                output_hidden_states=True,
-                return_dict=True
-            )
-
-            hidden_states = outputs.hidden_states
-            hidden = hidden_states[-1].squeeze() #just get hidden state from last layer  
-            hidden_states_list.append(hidden)
-
-    hidden_states = torch.cat(hidden_states_list, dim=0)
-    return hidden_states
-
-
-def get_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-    """
-    Extracts mean pooled token embeddings from the language model for each text sample.
-
-    Args:
-        model: The language model (e.g., LlamaForCausalLM, MistralForCausalLM).
-        processor: The processor used for tokenization.
-        text_samples: A list of text strings.
-        device: Device for model execution.
-        percent_thru_model: Not used.
-
-    Returns:
-        torch.Tensor: Mean pooled embeddings per text sample.
-    """
-    mean_embeddings = []
-    # Determine if processor has a tokenizer attribute (Llama) or is itself a tokenizer (Mistral)
-    tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
-    
-    with torch.no_grad():
-        for text_sample in text_samples:
-            inputs = tokenizer(
-                text_sample,
-                add_special_tokens=False,
-                padding=False,
-                return_tensors="pt"
-            ).to(device)
-
-            outputs = model(
-                **inputs,
-                output_hidden_states=True,
-                return_dict=True
-            )
-
-            last_hidden = outputs.hidden_states[-1]  # (1, seq_len, hidden_dim)
-            mean_emb = last_hidden.mean(dim=1)       # (1, hidden_dim)
-            mean_embeddings.append(mean_emb)
-
-    return torch.cat(mean_embeddings, dim=0)  # (n_samples, hidden_dim)
-
-
-
-# def get_clip_text_cls_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-#     """
-#     Extracts CLS embeddings for text using CLIP.
-    
-#     Args:
-#         model: The CLIP model to generate embeddings.
-#         processor: The processor used for transforming text.
-#         text_samples: A list of strings.
-#         device: The device to move the tensors to.
-#         percent_thru_model (int): Percent through model that embedding is extracted from.
-
-#     Returns:
-#         torch.Tensor: The generated text embeddings.
-#     """
-#     model.eval()
-    
-#     # Preprocess the text for the model
-#     inputs = processor(text=text_samples, return_tensors="pt", padding=True, truncation=True)
-#     inputs = inputs.to(device)
-
-#     # Generate text embeddings without computing gradients
-#     with torch.no_grad():
-#         text_features = model.get_text_features(input_ids=inputs['input_ids'], 
-#                                                attention_mask=inputs.get('attention_mask', None))
-    
-#     return text_features
-
-
-# def get_clip_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-#     """
-#     Extracts token-level embeddings for text using CLIP.
-    
-#     Args:
-#         model: The CLIP model to generate embeddings.
-#         processor: The processor used for transforming text.
-#         text_samples: A list of strings.
-#         device: The device to move the tensors to.
-#         percent_thru_model (int): Percent through model that embedding is extracted from.
-
-#     Returns:
-#         torch.Tensor: The generated token embeddings.
-#     """
-#     model.eval()
-#     all_token_embeddings = []
-    
-#     with torch.no_grad():
-#         inputs = processor(text=text_samples, return_tensors="pt", padding=True, truncation=True)
-#         inputs = inputs.to(device)
-        
-#         # Get the text encoder outputs
-#         text_outputs = model.text_model(**inputs, output_hidden_states=True)
-        
-#         # Get the last hidden states
-#         last_hidden_states = text_outputs.last_hidden_state  # [batch_size, seq_len, hidden_dim]
-        
-#         # Flatten to get all tokens
-#         for i, text in enumerate(text_samples):
-#             # Get the actual length (excluding padding)
-#             attention_mask = inputs['attention_mask'][i]
-#             actual_length = attention_mask.sum().item()
-            
-#             # Extract non-padded tokens
-#             token_embeddings = last_hidden_states[i, :actual_length, :]
-#             all_token_embeddings.append(token_embeddings)
-    
-#     # Concatenate all token embeddings
-#     return torch.cat(all_token_embeddings, dim=0)
-
-
-# def get_simple_text_cls_embeddings(model, tokenizer, text_samples, device, percent_thru_model=100):
-#     """
-#     Simple text embeddings using a basic transformer model.
-#     """
-#     model.eval()
-#     model = model.to(device)
-    
-#     # Tokenize and get embeddings
-#     inputs = tokenizer(text_samples, return_tensors="pt", padding=True, truncation=True, max_length=512)
-#     inputs = inputs.to(device)
-    
-#     with torch.no_grad():
-#         outputs = model(**inputs)
-#         # Use mean pooling of last hidden states
-#         embeddings = outputs.last_hidden_state.mean(dim=1)
-    
-#     return embeddings
-
-
-# def get_simple_text_patch_embeddings(model, tokenizer, text_samples, device, percent_thru_model=100):
-#     """
-#     Simple token-level embeddings using a basic transformer model.
-#     """
-#     model.eval()
-#     model = model.to(device)
-#     all_token_embeddings = []
-    
-#     with torch.no_grad():
-#         inputs = tokenizer(text_samples, return_tensors="pt", padding=True, truncation=True, max_length=512)
-#         inputs = inputs.to(device)
-        
-#         outputs = model(**inputs)
-#         last_hidden_states = outputs.last_hidden_state  # [batch_size, seq_len, hidden_dim]
-        
-#         # Flatten to get all tokens (excluding padding)
-#         for i, text in enumerate(text_samples):
-#             attention_mask = inputs['attention_mask'][i]
-#             actual_length = attention_mask.sum().item()
-            
-#             # Extract non-padded tokens
-#             token_embeddings = last_hidden_states[i, :actual_length, :]
-#             all_token_embeddings.append(token_embeddings)
-    
-#     # Concatenate all token embeddings
-#     return torch.cat(all_token_embeddings, dim=0)
-
-
-
-# def get_llama_text_patch_embeddings(model, processor, text_samples, device, percent_thru_model=100):
-#     """
-#     Returns a flat tensor of token embeddings for all text samples in a batch.
-#     Each token gets a 4096-dim vector, excluding padding.
-    
-#     Args:
-#         model: The LLAMA model to generate embeddings.
-#         processor: The HuggingFace processor.
-#         text_samples: A list of strings (batch).
-#         device: torch device.
-
-#     Returns:
-#         torch.Tensor: [n_total_tokens, hidden_dim]
-#     """
-#     model.eval()
-#     all_token_embeddings = []
-
-#     with torch.no_grad():
-#         inputs = processor(
-#             text=text_samples,
-#             return_tensors="pt",
-#             padding=True,
-#             truncation=True,
-#             add_special_tokens=False,
-#             return_attention_mask=True,
-#             token='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'
-#         ).to(device)
-
-#         outputs = model(
-#             **inputs,
-#             output_hidden_states=True,
-#             return_dict=True
-#         )
-
-#         last_hidden = outputs.hidden_states[-1]  # [B, T, D]
-#         attention_mask = inputs["attention_mask"]  # [B, T]
-
-#         for j in range(last_hidden.size(0)):
-#             valid_token_mask = attention_mask[j].bool()
-#             token_embeddings = last_hidden[j][valid_token_mask]  # [n_valid_tokens, D]
-#             all_token_embeddings.append(token_embeddings.cpu())
-
-#     return torch.cat(all_token_embeddings, dim=0)
-
-
-def compute_raw_batch_embeddings(images, embedding_fxn, model, processor, device, 
-                                 percent_thru_model, dataset_name, batch_size=100):
-    """
-    Compute raw embeddings for images in batches and split into train/test sets.
-
-    Args:
-        images (list): List of PIL.Image objects.
-        embedding_fxn (function): Function to compute embeddings.
-        model: Model for generating embeddings.
-        processor: Processor for preprocessing images.
-        device: Device to run the model on.
-        percent_thru_model (int): Model layer from which to extract representations.
-        dataset_name (str): Dataset name (used for loading metadata).
-        batch_size (int): Number of images per batch.
-
-    Returns:
-        tuple: (train_embeddings, test_embeddings)
-    """
-    print("Computing embeddings in batches...")
-    embeddings = []
-    n_batches = (len(images) + batch_size - 1) // batch_size  # Compute number of batches
-    for i in tqdm(range(n_batches), desc="Computing embeddings"):
-        batch_images = images[i * batch_size:(i + 1) * batch_size]
-        batch_embeddings = embedding_fxn(model, processor, batch_images, device, percent_thru_model)
-        # print(f"batch embeddings: {batch_embeddings.shape}")
-        embeddings.append(batch_embeddings.cpu())
-        del batch_embeddings
-        torch.cuda.empty_cache()
-    embeddings = torch.cat(embeddings, dim=0)  # Concatenate all batch embeddings
-    # print(f"Extracted embeddings of shape: {embeddings.shape}")
-    return embeddings
-
-
-def sort_embeddings_by_split(embeddings, dataset_name):
-    """
-    Sort embeddings into train and test sets based on metadata split.
-
-    Args:
-        embeddings (torch.Tensor): The embeddings to split.
-        dataset_name (str): The name of the dataset.
-
-    Returns:
-        tuple: (train_embeddings, test_embeddings)
-    """
-    # Load metadata
-    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
-
-    # Compute number of embeddings per image
-    n_embeddings_per_sample = embeddings.shape[0] // len(metadata)  # Ensure integer division
-
-    # Create boolean masks for train/test
-    train_mask = metadata["split"] == "train"
-    test_mask = metadata["split"] == "test"
-
-    # Repeat each split mask for all patches per image
-    train_mask = train_mask.repeat(n_embeddings_per_sample).to_numpy()
-    test_mask = test_mask.repeat(n_embeddings_per_sample).to_numpy()
-
-    # Apply masks to embeddings
-    train_embeddings = embeddings[train_mask]
-    test_embeddings = embeddings[test_mask]
-
-    return train_embeddings, test_embeddings
-
-def compute_train_avg_and_norm(embeddings, dataset_name, model_input_size, sample_type):
-    if sample_type == 'patch':
-        #Load split_df
-        split_df = get_patch_split_df(dataset_name, model_input_size)
-
-        # Create boolean masks for train/test
-        train_mask = split_df[split_df == 'train']
-
-        #Filter out the embeddings that are 'padding'
-        relevant_indices = filter_patches_by_image_presence(train_mask.index, dataset_name, model_input_size).tolist()
-        final_mask = train_mask.loc[train_mask.index.intersection(relevant_indices)]
-    else:
-        split_df = get_split_df(dataset_name)
-        final_mask = split_df[split_df == 'train']
-    
-    # Apply masks to embeddings
-    train_embeddings = embeddings[final_mask.index.to_list()].float()
-    
-    mean_train_embedding = train_embeddings.mean(dim=0)
-    train_norm = train_embeddings.norm(dim=1, keepdim=True).mean()
-    return mean_train_embedding, train_norm
-    
-
-def center_and_normalize_embeddings(embeddings, dataset_name, model_input_size, sample_type):
-    """
-    Center and normalize embeddings using statistics from the training set.
-
-    Args:
-        train_embeddings (torch.Tensor): Tensor of training set embeddings.
-        test_embeddings (torch.Tensor): Tensor of test set embeddings.
-
-    Returns:
-        tuple: (normalized_train_embeddings, normalized_test_embeddings)
-    """
-    mean_train_embedding, train_norm = compute_train_avg_and_norm(embeddings, dataset_name, model_input_size, sample_type)
-    centered_embeddings = embeddings - mean_train_embedding
-    norm_embeddings = centered_embeddings / train_norm
-
-    return norm_embeddings, mean_train_embedding, train_norm
-
-
-def compute_batch_embeddings(images, embedding_fxn, model, processor, device, 
-                             percent_thru_model, dataset_name, model_input_size,
-                             embeddings_file=None, batch_size=100, scratch_dir="",
-                             chunk_if_larger_gb=10):
-    """
-    Compute, center, and normalize embeddings for images.
-
-    Args:
-        images (list): List of PIL.Image objects.
-        embedding_fxn (function): Function to compute embeddings.
-        model: Model for generating embeddings.
-        processor: Processor for preprocessing images.
-        device: Device to run the model on.
-        percent_thru_model (int): Model layer from which to extract representations.
-        dataset_name (str): Dataset name.
-        embeddings_file (str): Path to save embeddings.
-        batch_size (int): Number of images per batch.
-        chunk_if_larger_gb (float): If file size exceeds this, save as chunks. Set to None to disable chunking.
-
-    Returns:
-        tuple: (normalized_train_embeddings, normalized_test_embeddings)
-    """
-    embeddings = compute_raw_batch_embeddings(
-        images, embedding_fxn, model, processor, device, percent_thru_model, dataset_name, batch_size
-    )
-    
-    # if 'Cal' in dataset_name:
-    #     train_embeds_dic = torch.load(f'{scratch_dir}Embeddings/{dataset_name.split("-")[0]}/{embeddings_file}')
-    #     mean_train_embedding, train_norm = train_embeds_dic['mean_train_embedding'], train_embeds_dic['train_norm']
-    #     centered_embeddings = embeddings - mean_train_embedding
-    #     norm_embeddings = centered_embeddings / train_norm
-    # else:
-    #     if 'cls' in embeddings_file:
-    #         sample_type = 'cls'
-    #     else:
-    #         sample_type = 'patch'
-    #     norm_embeddings, mean_train_embedding, train_norm = center_and_normalize_embeddings(embeddings, 
-    #                                                                                         dataset_name, 
-    #                                                                                         model_input_size,
-    #                                                                                         sample_type)
-    if 'cls' in embeddings_file:
-        sample_type = 'cls'
-    else:
-        sample_type = 'patch'
-    norm_embeddings, mean_train_embedding, train_norm = center_and_normalize_embeddings(embeddings, 
-                                                                                        dataset_name, 
-                                                                                        model_input_size,
-                                                                                        sample_type)
-    embeds_dic = {
-            'normalized_embeddings': norm_embeddings,
-            'mean_train_embedding': mean_train_embedding,
-            'train_norm': train_norm
-        }
-    
-    if embeddings_file:
-        output_file = f'Embeddings/{dataset_name}/{embeddings_file}'
-        
-        # Always save as chunks
-        if chunk_if_larger_gb is not None:
-            bytes_per_gb = 1024 * 1024 * 1024
-            embedding_size_gb = (norm_embeddings.numel() * norm_embeddings.element_size()) / bytes_per_gb
-            
-            # Calculate number of chunks needed
-            if embedding_size_gb > chunk_if_larger_gb:
-                num_chunks = int(np.ceil(embedding_size_gb / chunk_if_larger_gb))
-                print(f"Embedding size {embedding_size_gb:.2f}GB exceeds {chunk_if_larger_gb}GB threshold")
-            else:
-                num_chunks = 1
-                print(f"Embedding size {embedding_size_gb:.2f}GB - saving as 1 chunk")
-                
-            chunk_size_samples = len(norm_embeddings) // num_chunks
-            print(f"Saving as {num_chunks} chunk(s)")
-            
-            # Save chunk info
-            chunk_info = {
-                'num_chunks': num_chunks,
-                'chunk_size': chunk_size_samples,
-                'total_samples': len(norm_embeddings),
-                'embedding_dim': norm_embeddings.shape[1],
-                'chunks': []
-            }
-            
-            # Save each chunk
-            for i in range(num_chunks):
-                start_idx = i * chunk_size_samples
-                end_idx = (i + 1) * chunk_size_samples if i < num_chunks - 1 else len(norm_embeddings)
-                
-                chunk_embeddings = norm_embeddings[start_idx:end_idx]
-                chunk_file = output_file.replace('.pt', f'_chunk_{i}.pt')
-                
-                # Save chunk with metadata
-                chunk_data = {
-                    'normalized_embeddings': chunk_embeddings,
-                    'mean_train_embedding': mean_train_embedding,
-                    'train_norm': train_norm
-                }
-                
-                torch.save(chunk_data, chunk_file)
-                print(f"  Saved chunk {i}: indices {start_idx}-{end_idx} to {chunk_file}")
-                
-                chunk_info['chunks'].append({
-                    'file': os.path.basename(chunk_file),
-                    'start_idx': start_idx,
-                    'end_idx': end_idx,
-                    'shape': list(chunk_embeddings.shape)
-                })
-                
-                # Clear memory
-                del chunk_embeddings
-                gc.collect()
-            
-            # Save chunk info
-            info_file = output_file.replace('.pt', '_chunks_info.json')
-            with open(info_file, 'w') as f:
-                json.dump(chunk_info, f, indent=2)
-            
-            print(f"Chunk info saved to {info_file}")
-            
-            # Update embedding stats with chunk info
-            embeds_dic['is_chunked'] = True
-            embeds_dic['chunk_info'] = chunk_info
-            update_embedding_stats_json(dataset_name, embeddings_file, embeds_dic, model_input_size)
-            
-            return embeds_dic
-        
-        # Save as single file (only if chunk_if_larger_gb is None)
-        torch.save(embeds_dic, output_file)
-        print(f"Embeddings saved to {output_file} :)")
-        
-        # Update the embedding stats JSON
-        update_embedding_stats_json(dataset_name, embeddings_file, embeds_dic, model_input_size)
-
-    return embeds_dic
-
-# import os
-# import torch
-# import pandas as pd
-# from tqdm import tqdm
-# from compute_concepts_utils import get_patch_split_df, filter_patches_by_image_presence
-
-
-# def get_llama_text_patch_embeddings(model, processor, text_samples, device, output_dir, batch_index):
-#     """
-#     Returns a flat tensor of token embeddings for all text samples in a batch and writes them to disk.
-#     """
-#     model.eval()
-#     all_token_embeddings = []
-
-#     with torch.no_grad():
-#         inputs = processor(
-#             text=text_samples,
-#             return_tensors="pt",
-#             padding=True,
-#             truncation=True,
-#             add_special_tokens=False,
-#             return_attention_mask=True,
-#             token='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'
-#         ).to(device)
-
-#         outputs = model(
-#             **inputs,
-#             output_hidden_states=True,
-#             return_dict=True
-#         )
-
-#         last_hidden = outputs.hidden_states[-1]  # [B, T, D]
-#         attention_mask = inputs["attention_mask"]  # [B, T]
-
-#         for j in range(last_hidden.size(0)):
-#             valid_token_mask = attention_mask[j].bool()
-#             token_embeddings = last_hidden[j][valid_token_mask]  # [n_valid_tokens, D]
-#             all_token_embeddings.append(token_embeddings.cpu())
-
-#     embeddings = torch.cat(all_token_embeddings, dim=0)
-#     os.makedirs(output_dir, exist_ok=True)
-#     torch.save(embeddings, os.path.join(output_dir, f"raw_batch_{batch_index}.pt"))
-#     torch.cuda.empty_cache()
-
-
-# def compute_raw_batch_embeddings_to_disk(images, embedding_fxn, model, processor, device, 
-#                                           percent_thru_model, dataset_name, batch_size=100):
-#     print("Computing and saving raw embeddings batch-wise...")
-#     output_dir = f"Embeddings/{dataset_name}/raw_batches"
-#     n_batches = (len(images) + batch_size - 1) // batch_size
-
-#     for i in tqdm(range(n_batches), desc="Computing embeddings"):
-#         batch_images = images[i * batch_size:(i + 1) * batch_size]
-#         embedding_fxn(model, processor, batch_images, device, output_dir, batch_index=i)
-
-#     return output_dir
-
-
-# def load_all_raw_embeddings(raw_dir):
-#     print("Loading all saved raw embeddings...")
-#     tensors = []
-#     for file in sorted(os.listdir(raw_dir)):
-#         if file.endswith(".pt"):
-#             tensors.append(torch.load(os.path.join(raw_dir, file)))
-#     return torch.cat(tensors, dim=0)
-
-
-# def compute_batch_embeddings(images, embedding_fxn, model, processor, device, 
-#                              percent_thru_model, dataset_name, model_input_size,
-#                              embeddings_file=None, batch_size=100):
-#     raw_dir = compute_raw_batch_embeddings_to_disk(
-#         images, embedding_fxn, model, processor, device, 
-#         percent_thru_model, dataset_name, batch_size
-#     )
-
-#     embeddings = load_all_raw_embeddings(raw_dir)
-
-#     norm_embeddings, mean_train_embedding, train_norm = center_and_normalize_embeddings(
-#         embeddings, dataset_name, model_input_size
-#     )
-
-#     embeds_dic = {
-#         'normalized_embeddings': norm_embeddings,
-#         'mean_train_embedding': mean_train_embedding,
-#         'train_norm': train_norm
-#     }
-
-#     if embeddings_file:
-#         os.makedirs(f'Embeddings/{dataset_name}', exist_ok=True)
-#         output_file = f'Embeddings/{dataset_name}/{embeddings_file}'
-#         torch.save(embeds_dic, output_file)
-#         print(f"Embeddings saved to {output_file} :)")
-
-#     return embeds_dic
-    
 
 ### For Computing Concept Vectors ###
 def assign_labels_to_centers(embeddings, cluster_centers, device):
@@ -909,23 +52,71 @@ def assign_labels_to_centers(embeddings, cluster_centers, device):
     labels = torch.argmin(dists, dim=1)
     return labels.cpu()
 
-def run_fast_pytorch_kmeans(n_clusters, train_embeddings, test_embeddings, cal_embeddings, device):   
-    # Initialize KMeans
-    kmeans = KMeans(n_clusters=n_clusters, mode='euclidean', verbose=True, max_iter=10000, tol=1e-6)
+def run_fast_pytorch_kmeans(n_clusters, train_embeddings, test_embeddings, cal_embeddings, device):
+    """
+    Run KMeans clustering with fast_pytorch_kmeans as primary option and faiss-gpu as fallback.
     
-    # Fit k-means
-    kmeans = KMeans(n_clusters=n_clusters, mode='euclidean', verbose=1)
-    print(f"Fitting KMeans for {n_clusters} clusters...")
-    train_labels = kmeans.fit_predict(train_embeddings.to(device))
-    cluster_centers = kmeans.centroids.detach().cpu()
-    
-    # Fit KMeans on training embeddings and predict cluster labels
-    test_labels = assign_labels_to_centers(test_embeddings, cluster_centers, device)
-    cal_labels = assign_labels_to_centers(cal_embeddings, cluster_centers, device)
-    
-    # Retrieve cluster centers
-    cluster_centers = kmeans.centroids
-    return train_labels, test_labels, cal_labels, cluster_centers
+    Args:
+        n_clusters: Number of clusters
+        train_embeddings: Training embeddings tensor
+        test_embeddings: Test embeddings tensor  
+        cal_embeddings: Calibration embeddings tensor
+        device: Device to run on (cuda/cpu)
+        
+    Returns:
+        train_labels, test_labels, cal_labels, cluster_centers
+    """
+    try:
+        # Try fast_pytorch_kmeans first
+        print(f"Attempting fast_pytorch_kmeans with {n_clusters} clusters...")
+        kmeans = KMeans(n_clusters=n_clusters, mode='euclidean', verbose=True, max_iter=10000, tol=1e-6)
+        
+        # Fit k-means on training data
+        train_labels = kmeans.fit_predict(train_embeddings.to(device))
+        cluster_centers = kmeans.centroids.detach().cpu()
+        
+        # Assign labels to test and cal sets
+        test_labels = assign_labels_to_centers(test_embeddings, cluster_centers, device)
+        cal_labels = assign_labels_to_centers(cal_embeddings, cluster_centers, device)
+        
+        print("Successfully completed clustering with fast_pytorch_kmeans")
+        return train_labels, test_labels, cal_labels, cluster_centers
+        
+    except Exception as e:
+        print(f"fast_pytorch_kmeans failed with error: {e}")
+        print("Falling back to faiss-gpu...")
+        
+        # Ensure inputs are float32 and on CPU for faiss
+        train_embeddings = train_embeddings.cpu().float()
+        test_embeddings = test_embeddings.cpu().float()
+        cal_embeddings = cal_embeddings.cpu().float()
+        
+        # Convert to numpy
+        train_np = train_embeddings.numpy()
+        test_np = test_embeddings.numpy()
+        cal_np = cal_embeddings.numpy()
+        d = train_np.shape[1]
+        
+        # Initialize faiss kmeans
+        gpu_available = device == 'cuda' and faiss.get_num_gpus() > 0
+        kmeans = faiss.Kmeans(d=d, k=n_clusters, niter=300, verbose=True, gpu=gpu_available)
+        
+        print(f"Fitting FAISS KMeans with {n_clusters} clusters on {len(train_np)} samples...")
+        kmeans.train(train_np)
+        
+        print("Assigning labels to clusters...")
+        train_labels = kmeans.index.search(train_np, 1)[1].squeeze()
+        test_labels = kmeans.index.search(test_np, 1)[1].squeeze()
+        cal_labels = kmeans.index.search(cal_np, 1)[1].squeeze()
+        
+        # Convert back to torch tensors
+        train_labels = torch.from_numpy(train_labels).long()
+        test_labels = torch.from_numpy(test_labels).long()
+        cal_labels = torch.from_numpy(cal_labels).long()
+        cluster_centers = torch.from_numpy(kmeans.centroids)
+        
+        print("Successfully completed clustering with faiss-gpu")
+        return train_labels, test_labels, cal_labels, cluster_centers
 
 
 # def run_fast_pytorch_kmeans(n_clusters, train_embeddings, test_embeddings, cal_embeddings, device='cuda', max_iter=300):
@@ -1019,65 +210,149 @@ def map_samples_to_clusters(train_image_indices, train_labels, test_image_indice
     return train_cluster_to_samples, test_cluster_to_samples, cal_cluster_to_samples
 
 
-def gpu_kmeans(n_clusters, embeddings, dataset_name, device, model_input_size, concepts_filename=None, sample_type ='patch', map_samples=True):
+def gpu_kmeans(n_clusters, embeddings_path, dataset_name, device, model_input_size, concepts_filename=None, sample_type='patch', map_samples=True):
     """
-    Performs GPU-accelerated KMeans clustering on embeddings and saves the cluster centers.
-
+    Memory-efficient GPU-accelerated KMeans clustering that loads embeddings from chunks as needed.
+    Only loads the split (train/test/cal) that's currently being processed.
+    
     Args:
         n_clusters (int): Number of clusters for KMeans.
+        embeddings_path (str): Path to embeddings file (chunked or not).
         dataset_name (str): Name of the dataset.
-        train_embeddings (torch.Tensor): Training embeddings for clustering.
-        test_embeddings (torch.Tensor): Test embeddings for cluster assignment.
+        device: Device to run KMeans on.
+        model_input_size: Model input size.
         concepts_filename (str, optional): Filename to save the concepts.
-
+        sample_type (str): 'patch' or 'cls'
+        map_samples (bool): Whether to map samples to clusters.
+        
     Returns:
-        dict: Mapping of cluster labels to cluster centers.
-        dict: Mapping of cluster labels to sample indices from training embeddings.
-        dict: Mapping of cluster labels to sample indices from test embeddings.
+        Same as gpu_kmeans
     """
+    from utils.memory_management_utils import ChunkedEmbeddingLoader
+    
     # Clear GPU memory
     torch.cuda.empty_cache()
     gc.collect()
     
-    #separate embeddings into test and train
-    relevant_indices = torch.arange(embeddings.shape[0])
+    # Get split information
     if sample_type == 'patch':
         split_df = get_patch_split_df(dataset_name, model_input_size)
-        # Filter patches that are 'padding' given the preprocessing schemes
-        relevant_indices = filter_patches_by_image_presence(relevant_indices, dataset_name, model_input_size).tolist()
-        
-    elif sample_type == 'cls':
+        all_indices = split_df.index
+        relevant_indices = filter_patches_by_image_presence(all_indices, dataset_name, model_input_size).tolist()
+    else:
         split_df = get_split_df(dataset_name)
-        relevant_indices = split_df.index
+        all_indices = split_df.index
+        relevant_indices = list(all_indices)
     
+    # Get indices for each split
+    # Convert to set for O(1) membership checking
+    relevant_indices_set = set(relevant_indices)
+    train_indices = [idx for idx in split_df[split_df == 'train'].index if idx in relevant_indices_set]
+    test_indices = [idx for idx in split_df[split_df == 'test'].index if idx in relevant_indices_set]
+    cal_indices = [idx for idx in split_df[split_df == 'cal'].index if idx in relevant_indices_set]
     
-    # Get train and test image indices from split_df
-    train_image_indices = split_df[split_df == 'train'].index
-    test_image_indices = split_df[split_df == 'test'].index
-    cal_image_indices = split_df[split_df == 'cal'].index
-    train_relevant_indices = [idx for idx in relevant_indices if idx in train_image_indices]
-    test_relevant_indices = [idx for idx in relevant_indices if idx in test_image_indices]
-    cal_relevant_indices = [idx for idx in relevant_indices if idx in cal_image_indices]
-
-    train_embeddings = embeddings[train_relevant_indices]
-    test_embeddings = embeddings[test_relevant_indices]
-    cal_embeddings = embeddings[cal_relevant_indices]
+    # Parse dataset name and file from path for ChunkedEmbeddingLoader
+    # Expected format: {scratch_dir}Embeddings/{dataset_name}/{embeddings_file}
+    path_parts = embeddings_path.split('/')
+    embeddings_file = path_parts[-1]
+    dataset_name_from_path = path_parts[-2]
+    scratch_dir_from_path = '/'.join(path_parts[:-3]) + '/' if len(path_parts) > 3 else ''
     
-
-    # if concepts_filename and os.path.exists(f'Concepts/{dataset_name}/{concepts_filename}'):
-    #     label_to_center = torch.load(f'Concepts/{dataset_name}/{concepts_filename}')
-    #     train_labels = torch.load(f'Concepts/{dataset_name}/train_labels_{concepts_filename}')
-    #     test_labels = torch.load(f'Concepts/{dataset_name}/test_labels_{concepts_filename}')
-    # else:
-    train_labels, test_labels, cal_labels, cluster_centers = run_fast_pytorch_kmeans(n_clusters, 
-                                                                         train_embeddings, 
-                                                                         test_embeddings, 
-                                                                         cal_embeddings,
-                                                                         device)
+    # Load only train embeddings for KMeans
+    print("Loading train embeddings for KMeans...")
+    loader = ChunkedEmbeddingLoader(dataset_name_from_path, embeddings_file, scratch_dir_from_path, device='cpu')
+    train_embeddings = loader.load_specific_embeddings(train_indices)
+    
+    # Check if this is COCO, Broden-Pascal, or Broden-OpenSurfaces with Llama - if so, use faiss-gpu directly
+    if dataset_name.lower() in ['coco', 'broden-pascal', 'broden-opensurfaces'] and 'llama' in embeddings_file.lower():
+        print(f"Using faiss-gpu for {dataset_name} Llama combination...")
+        
+        # Ensure float32 and on CPU for faiss
+        train_embeddings = train_embeddings.cpu().float()
+        
+        # Convert to numpy
+        train_np = train_embeddings.numpy()
+        d = train_np.shape[1]
+        
+        # Initialize faiss kmeans with GPU
+        gpu_available = device == 'cuda' and faiss.get_num_gpus() > 0
+        kmeans = faiss.Kmeans(d=d, k=n_clusters, niter=300, verbose=True, gpu=gpu_available)
+        
+        print(f"Fitting FAISS KMeans with {n_clusters} clusters on {len(train_np)} samples...")
+        kmeans.train(train_np)
+        
+        # Get cluster assignments for train data
+        train_labels = kmeans.index.search(train_np, 1)[1].squeeze()
+        train_labels = torch.from_numpy(train_labels).long()
+        cluster_centers = torch.from_numpy(kmeans.centroids)
+        
+        # Clear train embeddings
+        del train_embeddings, train_np
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Process test embeddings
+        print("Loading test embeddings for cluster assignment...")
+        test_embeddings = loader.load_specific_embeddings(test_indices).cpu().float()
+        test_np = test_embeddings.numpy()
+        test_labels = kmeans.index.search(test_np, 1)[1].squeeze()
+        test_labels = torch.from_numpy(test_labels).long()
+        
+        # Clear test embeddings
+        del test_embeddings, test_np
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Process cal embeddings
+        print("Loading cal embeddings for cluster assignment...")
+        cal_embeddings = loader.load_specific_embeddings(cal_indices).cpu().float()
+        cal_np = cal_embeddings.numpy()
+        cal_labels = kmeans.index.search(cal_np, 1)[1].squeeze()
+        cal_labels = torch.from_numpy(cal_labels).long()
+        
+        # Clear cal embeddings
+        del cal_embeddings, cal_np
+        
+    else:
+        # Use original fast_pytorch_kmeans for other cases
+        train_embeddings = train_embeddings.to(device)
+        
+        # Run KMeans on train embeddings
+        print(f"Running KMeans with {n_clusters} clusters on {len(train_embeddings)} train samples...")
+        kmeans = KMeans(n_clusters=n_clusters, mode='euclidean', verbose=0)
+        train_labels = kmeans.fit_predict(train_embeddings)
+        cluster_centers = kmeans.centroids
+        
+        # Clear train embeddings from GPU
+        del train_embeddings
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Assign test embeddings to clusters
+        print("Loading test embeddings for cluster assignment...")
+        test_embeddings = loader.load_specific_embeddings(test_indices).to(device)
+        test_labels = kmeans.predict(test_embeddings)
+        
+        # Clear test embeddings
+        del test_embeddings
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Assign cal embeddings to clusters
+        print("Loading cal embeddings for cluster assignment...")
+        cal_embeddings = loader.load_specific_embeddings(cal_indices).to(device)
+        cal_labels = kmeans.predict(cal_embeddings)
+        
+        # Clear cal embeddings
+        del cal_embeddings
+        torch.cuda.empty_cache()
+        gc.collect()
+    
     # Map cluster labels to cluster centers
     label_to_center = {label: center.cpu() for label, center in enumerate(cluster_centers)}
     label_to_center = dict(sorted(label_to_center.items()))
     label_to_center = {str(label): center for label, center in label_to_center.items()}
+    
     if concepts_filename:
         torch.save(label_to_center, f'Concepts/{dataset_name}/{concepts_filename}')
         torch.save(cluster_centers, f'Concepts/{dataset_name}/cluster_centers_{concepts_filename}')
@@ -1089,11 +364,11 @@ def gpu_kmeans(n_clusters, embeddings, dataset_name, device, model_input_size, c
     train_cluster_to_samples, test_cluster_to_samples, cal_cluster_to_samples = [], [], []
     if map_samples:
         train_cluster_to_samples, test_cluster_to_samples, cal_cluster_to_samples = map_samples_to_clusters(
-                                                                            train_relevant_indices, train_labels, 
-                                                                            test_relevant_indices, test_labels,
-                                                                            cal_relevant_indices, cal_labels,
-                                                                            dataset_name, concepts_filename)
-
+            train_indices, train_labels,
+            test_indices, test_labels,
+            cal_indices, cal_labels,
+            dataset_name, concepts_filename)
+    
     return label_to_center, train_cluster_to_samples, test_cluster_to_samples, cal_cluster_to_samples
 
 
@@ -1138,38 +413,44 @@ def aggregate_concept_vectors(concept_embeddings, dataset_name, save_file=None):
     return concept_vectors
 
 
-def compute_avg_concept_vectors(gt_samples_per_concept_train, embeddings, dataset_name=None, output_file=None):
+
+
+def compute_avg_concept_vectors(gt_samples_per_concept_train, loader, dataset_name=None, output_file=None):
     """
-    Computes the average concept vectors by aggregating the embeddings of samples 
-    belonging to each concept. Optionally normalizes the vectors.
-
+    Computes average concept vectors from chunked embeddings by loading only the necessary samples.
+    
     Args:
-        gt_samples_per_concept_train (dict): A dictionary where keys are concept names 
-                                             and values are lists of sample indices.
-        embeddings (torch.Tensor): A tensor containing embeddings where rows correspond 
-                                   to samples and columns correspond to feature dimensions.
-        normalize (bool, optional): If True, normalizes the computed concept vectors to 
-                                    have unit norm. Defaults to True.
-
+        gt_samples_per_concept_train (dict): Concept names -> lists of global sample indices
+        loader (ChunkedEmbeddingLoader): Loader for chunked embeddings
+        dataset_name (str): Dataset name for saving
+        output_file (str): Output file name
+        
     Returns:
-        dict: A dictionary where keys are concept names and values are the computed 
-              mean (and optionally normalized) concept vectors.
+        dict: Concept names -> average concept vectors
     """
     concepts = {}
     
-    for concept, samples in gt_samples_per_concept_train.items():
-        concept_embeddings = [embeddings[sample, :] for sample in samples]  # Collect embeddings
+    for concept, sample_indices in tqdm(gt_samples_per_concept_train.items(), desc="Computing avg concepts"):
+        if len(sample_indices) == 0:
+            print(f"Warning: No samples for concept {concept}")
+            continue
+            
+        # Load only the embeddings we need for this concept
+        concept_embeddings = loader.load_specific_embeddings(sample_indices)
         
-        concept_tensor = torch.stack(concept_embeddings)  # Convert to tensor
-        avg_vector = torch.mean(concept_tensor, dim=0)  # Compute mean
-
-        # avg_vector = avg_vector / avg_vector.norm()  # Normalize to unit norm
-
+        # Compute average
+        avg_vector = torch.mean(concept_embeddings, dim=0)
         concepts[concept] = avg_vector
+        
+        # Clear memory
+        del concept_embeddings
+        torch.cuda.empty_cache()
+        gc.collect()
     
     if output_file:
         torch.save(concepts, f'Concepts/{dataset_name}/{output_file}')
-        print(f'Concepts saved to Concepts/{dataset_name}/{output_file} :)') 
+        print(f'Concepts saved to Concepts/{dataset_name}/{output_file} :)')
+    
     return concepts
 
 
@@ -1537,28 +818,30 @@ def train_model(train_dl, test_dl, epochs, lr, weight_decay, lr_step_size, lr_ga
     for epoch in range(epochs):
         #training 
         model.train()
+        
         for batch_features, batch_labels in train_dl:
             batch_features, batch_labels = batch_features.to(device), batch_labels.to(device)
+            
             optimizer.zero_grad()
-
             outputs = model(batch_features.float()).view(-1)
             loss = criterion(outputs, batch_labels)
             loss.backward()
             optimizer.step()
-            
+        
         #evaluation
         train_avg_loss, train_acc, train_f1 = evaluate_model(model, train_dl, criterion, device)
         test_avg_loss, test_acc, test_f1 = evaluate_model(model, test_dl, criterion, device)
+        
         logs = log_progress(logs, train_avg_loss, train_acc, train_f1, test_avg_loss, test_acc, test_f1, epoch, epochs)
         
         #Potential early stopping
         if logs['train_f1'][-1] >= 0.99:
-            print(f"\nEarly stopping at epoch {epoch + 1}")
+            print(f"    Early stopping at epoch {epoch + 1} (train_f1 >= 0.99)")
             break
         if epoch > 0 and (best_loss - logs['train_loss'][-1]) < tolerance:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"\nEarly stopping at epoch {epoch + 1}")
+                print(f"    Early stopping at epoch {epoch + 1} (patience exhausted)")
                 break
         else:
             patience_counter = 0  # Reset if improvement is sufficient
@@ -1639,60 +922,287 @@ def compute_a_linear_separator(
     return model_weights, logs
 
 
-def compute_linear_separators(embeds, gt_samples_per_concept, dataset_name, sample_type, model_input_size, 
-                              device='cuda', output_file=None, lr=0.01, epochs=100, batch_size=32, patience=15, 
-                              tolerance=3, weight_decay=1e-4, lr_step_size=10, lr_gamma=0.5, balance_data=True, 
-                              balance_negatives=False):
+
+
+def preload_balanced_embeddings(embeddings_path: str, indices: list, labels: torch.Tensor, 
+                               loader) -> tuple:
     """
-    Computes linear separators for concepts.
+    Efficiently preload only the required embeddings from chunks.
     
     Args:
-        embeds: Dictionary mapping concept names to embedding tensors.
-        gt_samples_per_concept: Dictionary mapping concept names to lists of positive sample indices.
-        dataset_name: Name of the dataset.
-        sample_type: Type of sampling method.
-        model_input_size: Input size for the model.
-        device: Compute device (default: 'cuda').
-        output_file: Path to save results (default: None).
-        lr, epochs, batch_size, patience, tolerance, weight_decay, lr_step_size, lr_gamma: Training hyperparameters.
-        balance_data: Whether to balance positive and negative samples.
-        balance_negatives: Whether to balance negative samples across concepts.
-
+        embeddings_path: Path to chunked embeddings
+        indices: List of global indices to load
+        labels: Corresponding labels for the indices
+        loader: ChunkedEmbeddingLoader instance
+        
     Returns:
-        Dictionary containing learned linear separators and logs.
+        tuple: (embeddings_tensor, labels_tensor) both in memory
     """
+    # Map global indices to chunks
+    chunk_map = loader.global_indices_to_chunk_map(indices)
+    
+    # Preallocate result tensor
+    embedding_dim = loader.embedding_dim
+    embeddings = torch.zeros((len(indices), embedding_dim), dtype=torch.float32)
+    
+    # Create index mapping for efficient assignment
+    global_to_result_idx = {global_idx: i for i, global_idx in enumerate(indices)}
+    
+    # Load each chunk once and extract needed embeddings
+    for chunk_num, chunk_indices in chunk_map.items():
+        chunk_file = loader.chunk_info['chunks'][chunk_num]['file']
+        chunk_path = os.path.join(loader.chunks_dir, chunk_file)
+        
+        # Load chunk
+        chunk_data = torch.load(chunk_path, map_location='cpu', weights_only=False)
+        if isinstance(chunk_data, dict):
+            chunk_embeddings = chunk_data.get('normalized_embeddings', chunk_data.get('embeddings'))
+        else:
+            chunk_embeddings = chunk_data
+            
+        # Extract needed embeddings from this chunk
+        for global_idx, local_idx in chunk_indices:
+            result_idx = global_to_result_idx[global_idx]
+            embeddings[result_idx] = chunk_embeddings[local_idx]
+            
+        # Free chunk memory
+        del chunk_data, chunk_embeddings
+    
+    return embeddings, labels[indices]
+
+
+def preload_train_test_embeddings(embeddings_path: str, train_indices: list, test_indices: list,
+                                 labels: torch.Tensor, loader) -> tuple:
+    """
+    Efficiently preload both train and test embeddings in a single pass through chunks.
+    
+    Args:
+        embeddings_path: Path to chunked embeddings
+        train_indices: List of global indices for training
+        test_indices: List of global indices for testing
+        labels: Corresponding labels for all indices
+        loader: ChunkedEmbeddingLoader instance
+        
+    Returns:
+        tuple: (train_embeddings, train_labels, test_embeddings, test_labels)
+    """
+    # Combine all indices and track which are train vs test
+    all_indices = train_indices + test_indices
+    is_train = [True] * len(train_indices) + [False] * len(test_indices)
+    
+    # Map global indices to chunks
+    chunk_map = loader.global_indices_to_chunk_map(all_indices)
+    
+    # Preallocate result tensors
+    embedding_dim = loader.embedding_dim
+    train_embeddings = torch.zeros((len(train_indices), embedding_dim), dtype=torch.float32)
+    test_embeddings = torch.zeros((len(test_indices), embedding_dim), dtype=torch.float32)
+    
+    # Create index mappings
+    train_counter = 0
+    test_counter = 0
+    global_to_result_idx = {}
+    
+    for i, (global_idx, is_train_sample) in enumerate(zip(all_indices, is_train)):
+        if is_train_sample:
+            global_to_result_idx[global_idx] = ('train', train_counter)
+            train_counter += 1
+        else:
+            global_to_result_idx[global_idx] = ('test', test_counter)
+            test_counter += 1
+    
+    # Load each chunk once and extract needed embeddings
+    for chunk_num, chunk_indices in chunk_map.items():
+        chunk_file = loader.chunk_info['chunks'][chunk_num]['file']
+        chunk_path = os.path.join(loader.chunks_dir, chunk_file)
+        
+        # Load chunk
+        chunk_data = torch.load(chunk_path, map_location='cpu', weights_only=False)
+        if isinstance(chunk_data, dict):
+            chunk_embeddings = chunk_data.get('normalized_embeddings', chunk_data.get('embeddings'))
+        else:
+            chunk_embeddings = chunk_data
+            
+        # Extract needed embeddings from this chunk
+        for global_idx, local_idx in chunk_indices:
+            split, result_idx = global_to_result_idx[global_idx]
+            if split == 'train':
+                train_embeddings[result_idx] = chunk_embeddings[local_idx]
+            else:
+                test_embeddings[result_idx] = chunk_embeddings[local_idx]
+            
+        # Free chunk memory
+        del chunk_data, chunk_embeddings
+    
+    train_labels = labels[train_indices]
+    test_labels = labels[test_indices]
+    
+    return train_embeddings, train_labels, test_embeddings, test_labels
+
+
+def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_name, sample_type, model_input_size,
+                                    device='cuda', output_file=None, lr=0.01, epochs=100, batch_size=32, patience=15,
+                                    tolerance=3, weight_decay=1e-4, lr_step_size=10, lr_gamma=0.5, balance_data=True,
+                                    balance_negatives=False):
+    """
+    Computes linear separators using chunked embeddings loaded on-demand.
+    
+    Args:
+        embeddings_path: Path to embeddings file (chunked or not)
+        gt_samples_per_concept: Dictionary mapping concept names to lists of positive sample indices
+        Other args same as compute_linear_separators
+        
+    Returns:
+        Dictionary containing learned linear separators and logs
+    """
+    from utils.memory_management_utils import ChunkedEmbeddingLoader
+    
+    # Parse dataset name and file from path for ChunkedEmbeddingLoader
+    # Expected format: {scratch_dir}Embeddings/{dataset_name}/{embeddings_file}
+    path_parts = embeddings_path.split('/')
+    embeddings_file = path_parts[-1]
+    dataset_name_from_path = path_parts[-2]
+    scratch_dir_from_path = '/'.join(path_parts[:-3]) + '/' if len(path_parts) > 3 else ''
+    
+    # Get embedding info
+    loader = ChunkedEmbeddingLoader(dataset_name_from_path, embeddings_file, scratch_dir_from_path, device='cpu')
+    total_samples = loader.total_samples
+    embedding_dim = loader.embedding_dim
+    
     if sample_type == 'patch':
         split_df = get_patch_split_df(dataset_name, model_input_size=model_input_size)
-    elif sample_type == 'image':
+    elif sample_type == 'cls':
         split_df = get_split_df(dataset_name)
     
     concept_names = gt_samples_per_concept.keys()
-    
     concept_representations = {}
     logs = {}
     
-    #compute labels
+    # Compute labels
     print("Computing labels")
-    all_concept_labels = create_binary_labels(embeds.shape[0], gt_samples_per_concept)
+    all_concept_labels = create_binary_labels(total_samples, gt_samples_per_concept)
     
-    print("Sorting by train/test")
-    # Separate train and test_data (filtering out patches that don't correspond to any image locations)
-    train_embeds, train_all_concept_labels = sort_data_by_split(embeds, all_concept_labels, 'train', dataset_name, model_input_size, sample_type)
-    test_embeds, test_all_concept_labels = sort_data_by_split(embeds, all_concept_labels, 'test', dataset_name, model_input_size, sample_type)
+    # Get indices for train and test splits
+    if sample_type == 'patch':
+        nonpadding_indices = filter_patches_by_image_presence(split_df.index, dataset_name, model_input_size).tolist()
+        nonpadding_set = set(nonpadding_indices)
+        
+        train_split_indices = split_df[split_df == 'train'].index
+        test_split_indices = split_df[split_df == 'test'].index
+        
+        train_indices = [idx for idx in train_split_indices if idx in nonpadding_set]
+        test_indices = [idx for idx in test_split_indices if idx in nonpadding_set]
+    else:
+        train_indices = list(split_df[split_df == 'train'].index)
+        test_indices = list(split_df[split_df == 'test'].index)
     
+    # Process each concept
     for concept_name in tqdm(concept_names):
-        linear_separator, concept_logs = compute_a_linear_separator(concept=concept_name, 
-                                                                    train_embeds=train_embeds, test_embeds=test_embeds,
-                                                                    train_all_concept_labels=train_all_concept_labels,
-                                                                    test_all_concept_labels=test_all_concept_labels,
-                                                                    lr=lr, epochs=epochs, patience=patience, 
-                                                                    tolerance=tolerance, batch_size=batch_size,
-                                                                    weight_decay=weight_decay, lr_step_size=lr_step_size,
-                                                                    lr_gamma=lr_gamma, device=device,
-                                                                    balance_data=balance_data,
-                                                                    balance_negatives=balance_negatives)
-        concept_representations[concept_name] = linear_separator
+        print(f"Training linear classifier for concept {concept_name}")
+        
+        # Get labels for this concept
+        concept_labels = all_concept_labels[concept_name]
+        
+        # Balance dataset if needed
+        if balance_data:
+            # Convert to tensor for faster indexing
+            train_indices_tensor = torch.tensor(train_indices, dtype=torch.long)
+            train_labels = concept_labels[train_indices_tensor]
+            
+            # Use tensor operations for finding positive/negative indices
+            pos_indices_tensor = torch.where(train_labels == 1)[0]
+            neg_indices_tensor = torch.where(train_labels == 0)[0]
+            pos_indices = pos_indices_tensor.tolist()
+            neg_indices = neg_indices_tensor.tolist()
+            
+            if len(pos_indices) > 0 and len(neg_indices) > 0:
+                # Balance by undersampling
+                n_samples = min(len(pos_indices), len(neg_indices))
+                balanced_pos = random.sample(pos_indices, n_samples)
+                balanced_neg = random.sample(neg_indices, n_samples)
+                balanced_indices = balanced_pos + balanced_neg
+                balanced_train_indices = [train_indices[i] for i in balanced_indices]
+                
+                # Now balance test set
+                test_indices_tensor = torch.tensor(test_indices, dtype=torch.long)
+                test_labels = concept_labels[test_indices_tensor]
+                test_pos_indices = torch.where(test_labels == 1)[0].tolist()
+                test_neg_indices = torch.where(test_labels == 0)[0].tolist()
+                
+                if len(test_pos_indices) > 0 and len(test_neg_indices) > 0:
+                    n_test_samples = min(len(test_pos_indices), len(test_neg_indices))
+                    balanced_test_pos = random.sample(test_pos_indices, n_test_samples)
+                    balanced_test_neg = random.sample(test_neg_indices, n_test_samples)
+                    balanced_test_indices = balanced_test_pos + balanced_test_neg
+                    balanced_test_indices_global = [test_indices[i] for i in balanced_test_indices]
+                    
+                    # Preload both train and test embeddings together
+                    train_embeddings, train_labels_balanced, test_embeddings, test_labels_balanced = preload_train_test_embeddings(
+                        embeddings_path,
+                        balanced_train_indices,
+                        balanced_test_indices_global,
+                        concept_labels,
+                        loader
+                    )
+                    
+                    from torch.utils.data import TensorDataset
+                    train_dataset = TensorDataset(train_embeddings, train_labels_balanced)
+                    test_dataset = TensorDataset(test_embeddings, test_labels_balanced)
+                else:
+                    # No test samples
+                    test_dataset = None
+                    train_dataset = None
+                    print(f"  Warning: No positive or negative test samples for concept {concept_name}")
+            else:
+                # No positive or negative samples
+                train_dataset = None
+                test_dataset = None
+        
+        else:
+            # Not balancing - preload all train and test indices together
+            train_embeddings, train_labels_all, test_embeddings, test_labels_all = preload_train_test_embeddings(
+                embeddings_path,
+                train_indices,
+                test_indices,
+                concept_labels,
+                loader
+            )
+            
+            from torch.utils.data import TensorDataset
+            train_dataset = TensorDataset(train_embeddings, train_labels_all)
+            test_dataset = TensorDataset(test_embeddings, test_labels_all)
+        
+        # Create dataloaders
+        if train_dataset is not None and len(train_dataset) > 0 and test_dataset is not None and len(test_dataset) > 0:
+            train_dl = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            test_dl = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            
+            model_weights, concept_logs = train_model(train_dl, test_dl, epochs, lr, weight_decay, 
+                                                    lr_step_size, lr_gamma, patience, tolerance, device)
+        else:
+            # No samples, create random model
+            model = create_linear_model(embedding_dim, device)
+            model_weights = model.weight.detach().squeeze(0).cpu()
+            concept_logs = []
+            if train_dataset is None or len(train_dataset) == 0:
+                print(f"  No train samples for concept {concept_name}, using random model")
+            elif test_dataset is None or len(test_dataset) == 0:
+                print(f"  No test samples for concept {concept_name}, using random model")
+            # Initialize empty tensors for cleanup
+            train_embeddings = torch.tensor([])
+            test_embeddings = torch.tensor([])
+        
+        concept_representations[concept_name] = model_weights
         logs[concept_name] = concept_logs
+        
+        # Memory cleanup
+        del train_embeddings, test_embeddings
+        if train_dataset:
+            del train_dataset
+        if test_dataset:
+            del test_dataset
+        torch.cuda.empty_cache()
+        gc.collect()
     
     if output_file:
         torch.save(concept_representations, f'Concepts/{dataset_name}/{output_file}')
@@ -1703,175 +1213,6 @@ def compute_linear_separators(embeds, gt_samples_per_concept, dataset_name, samp
     return concept_representations, logs
   
 
-
-# def filter_concept_by_patch_activations(split, embeddings, concept_activations, top_percent,
-#                                         concept_labels, dataset_name, model_input_size, impose_negatives):
-#     """
-#     Filters and labels embeddings for a single concept by selecting the top and negative activations.
-
-#     Args:
-#         embeddings (torch.Tensor): Subset of all patch embeddings (shape: [n_samples, hidden_dim]).
-#         concept_activations (pd.Series): Activation scores for one concept (shape: [n_samples]).
-#         top_percent (float): Percentile of top activations to select.
-#         impose_negatives (bool): If True, select most negative activations instead of random negatives.
-
-#     Returns:
-#         (torch.Tensor, torch.Tensor): Filtered embeddings and corresponding binary labels.
-#     """
-#     # Get intersection of relevant and training/test indices
-#     split_df = get_patch_split_df(dataset_name, model_input_size)
-#     nonpadding_indices = filter_patches_by_image_presence(split_df.index, dataset_name, model_input_size).tolist()
-#     # print("non-padding indices:", nonpadding_indices[:10])
-#     split_indices = split_df[split_df == split].index
-#     # print("split indices:", split_indices[:10])
-#     # print("nonpadding indices:", nonpadding_indices[:10])
-#     relevant_indices = sorted(list(set(split_indices).intersection(nonpadding_indices)))
-
-#     # filter concept activations 
-#     concept_activations = concept_activations.loc[relevant_indices]
-    
-#     # print(concept_activations)
-#     # print("embeddings shape:", embeddings.shape)
-#     # print("concept labels shape", concept_labels.shape)
-
-#     if concept_labels is not None:
-#         # Get GT-positive and GT-negative index sets
-#         pos_gt = sorted((concept_labels == 1).nonzero(as_tuple=True)[0].tolist())
-#         neg_gt = sorted((concept_labels == 0).nonzero(as_tuple=True)[0].tolist())
-        
-#         # Keep only relevant ones
-#         pos_gt = sorted(list(set(pos_gt).intersection(set(relevant_indices))))
-#         neg_gt = sorted(list(set(neg_gt).intersection(set(relevant_indices))))
-        
-#         n_total = min(len(pos_gt), len(neg_gt))
-#         n_top = int(np.ceil(top_percent * n_total))
-
-#         # Restrict activations to only positive and negative GTs
-#         pos_activations = concept_activations.loc[relevant_indices]
-#         neg_activations = concept_activations.loc[relevant_indices]
-        
-#         # Take top activations *within* GT-positive and GT-negative
-#         pos_indices = pos_activations.nlargest(n_top).index.to_numpy()
-
-#         if impose_negatives:
-#             neg_indices = neg_activations.nsmallest(n_top).index.to_numpy()
-#         else:
-#             neg_indices = np.random.choice(neg_activations.index, size=n_top, replace=False)
-
-#         n_to_sample = min(len(pos_indices), len(neg_indices))
-#         pos_indices = np.random.choice(pos_indices, size=n_to_sample, replace=False)
-#         neg_indices = np.random.choice(neg_indices, size=n_to_sample, replace=False)
-#         # print(pos_indices[:5])
-
-#         # from general_utils import load_images
-#         # from visualize_concepts_w_samples_utils import plot_patches_w_corr_images
-#         # import visualize_concepts_w_samples_utils
-#         # importlib.reload(visualize_concepts_w_samples_utils)
-#         # all_images, train_images, test_images = load_images(dataset_name='CLEVR')
-#         # print("pos samples", pos_indices.tolist()[:7])
-#         # plot_patches_w_corr_images(pos_indices.tolist()[:7], concept_activations, all_images, 'Blah', (224, 224),
-#         #                        save_path=None, patch_size=14, metric_type='CosSim')
-#         # print("neg samples", neg_indices.tolist()[:7])
-#         # plot_patches_w_corr_images(neg_indices.tolist()[:7], concept_activations, all_images, 'Blah', (224, 224),
-#         #                        save_path=None, patch_size=14, metric_type='CosSim')
-        
-#         all_indices = np.concatenate([pos_indices, neg_indices])
-#         labels = concept_labels[all_indices]
-
-#     else:
-#         n_total = len(concept_activations)
-#         n_top = int(np.ceil(top_percent * n_total))
-#         top_indices = concept_activations.nlargest(n_top).index.to_numpy()
-#         if impose_negatives:
-#             bot_indices = concept_activations.nsmallest(n_top).index.to_numpy()
-#         else:
-#             remaining_indices = concept_activations.drop(index=top_indices).index.to_numpy()
-#             bot_indices = np.random.choice(remaining_indices, size=n_top, replace=False)
-        
-#         labels = np.concatenate([np.ones(n_top), np.zeros(n_top)])
-#         all_indices = np.concatenate([top_indices, bot_indices])
-#         labels = torch.tensor(labels, dtype=torch.float32)
-
-#     # print("first 5 indices:", all_indices)
-#     filtered_embeddings = embeddings[all_indices]
-#     return filtered_embeddings, labels
-
-# def filter_concept_by_patch_activations(split, embeddings, concept_activations, top_percent,
-#                                         concept_labels, dataset_name, model_input_size, impose_negatives):
-#     """
-#     Filters and labels embeddings for a single concept by selecting the top and negative activations.
-
-#     Args:
-#         embeddings (torch.Tensor): Subset of all patch embeddings (shape: [n_samples, hidden_dim]).
-#         concept_activations (pd.Series): Activation scores for one concept (shape: [n_samples]).
-#         top_percent (float): Percentile of top activations to select.
-#         impose_negatives (bool): If True, select most negative activations instead of random negatives.
-
-#     Returns:
-#         (torch.Tensor, torch.Tensor): Filtered embeddings and corresponding binary labels.
-#     """
-#     # Get intersection of relevant and training/test indices
-#     split_df = get_patch_split_df(dataset_name, model_input_size)
-#     nonpadding_indices = filter_patches_by_image_presence(split_df.index, dataset_name, model_input_size).tolist()
-#     # print("non-padding indices:", nonpadding_indices[:10])
-#     split_indices = split_df[split_df == split].index
-#     relevant_indices = list(set(split_indices).intersection(nonpadding_indices))
-#     # print("relevant indices:", len(relevant_indices))
-
-#     #filter concept activations 
-#     concept_activations = concept_activations.iloc[relevant_indices]
-    
-#     # print(concept_activations)
-#     # print("embeddings shape:", embeddings.shape)
-#     # print("concept labels shape", concept_labels.shape)
-    
-#     n_total = len(concept_activations)
-#     n_top = int(np.ceil(top_percent * n_total))
-
-#     top_indices = concept_activations.nlargest(n_top).index.to_numpy()
-
-#     if impose_negatives:
-#         bot_indices = concept_activations.nsmallest(n_top).index.to_numpy()
-#     else:
-#         remaining_indices = concept_activations.drop(index=top_indices).index.to_numpy()
-#         bot_indices = np.random.choice(remaining_indices, size=n_top, replace=False)
-    
-#     if concept_labels is not None:
-#         pos_gt = (concept_labels == 1).nonzero(as_tuple=True)[0]
-#         neg_gt = (concept_labels == 0).nonzero(as_tuple=True)[0]
-        
-#         pos_candidates = list(set(pos_gt.tolist()).intersection(set(top_indices.tolist())))
-#         neg_candidates = list(set(neg_gt.tolist()).intersection(set(bot_indices.tolist())))
-        
-#         n_to_sample = min(len(pos_candidates), len(neg_candidates))
-#         # Sample equally from both
-#         pos_indices = np.random.choice(pos_candidates, size=n_to_sample, replace=False)
-#         neg_indices = np.random.choice(neg_candidates, size=n_to_sample, replace=False)
-#         # print(pos_indices[:5])
-        
-#         # from general_utils import load_images
-#         # from visualize_concepts_w_samples_utils import plot_patches_w_corr_images
-#         # import visualize_concepts_w_samples_utils
-#         # importlib.reload(visualize_concepts_w_samples_utils)
-#         # all_images, train_images, test_images = load_images(dataset_name='CLEVR')
-#         # print("pos samples", pos_indices.tolist()[:7])
-#         # plot_patches_w_corr_images(pos_indices.tolist()[:7], concept_activations, all_images, 'Blah', (224, 224),
-#         #                        save_path=None, patch_size=14, metric_type='CosSim')
-#         # print("neg samples", neg_indices.tolist()[:7])
-#         # plot_patches_w_corr_images(neg_indices.tolist()[:7], concept_activations, all_images, 'Blah', (224, 224),
-#         #                        save_path=None, patch_size=14, metric_type='CosSim')
-        
-#         all_indices = np.concatenate([pos_indices, neg_indices])
-#         labels = concept_labels[all_indices]
-
-#     else:
-#         labels = np.concatenate([np.ones(n_top), np.zeros(n_top)])
-#         all_indices = np.concatenate([top_indices, bot_indices])
-#         labels = torch.tensor(labels, dtype=torch.float32)
-
-#     # print("first 5 indices:", all_indices)
-#     filtered_embeddings = embeddings[all_indices]
-#     return filtered_embeddings, labels
 
 
 def filter_embeddings_by_patch_activations(embeddings, act_metrics, gt_samples_per_concept, top_percent, split, dataset_name,
@@ -2005,550 +1346,7 @@ def compute_linear_separators_w_superpatches_across_pers(top_pers, embeds, origi
                                                   balance_negatives=balance_negatives,
                                                   impose_negatives=impose_negatives)
         
-        
-# def finetune_linear_separators_w_superpatches(fine_tuning_params, concepts_across_iterations, all_logs, embeds, dataset_name, 
-#                                               model_input_size, device, batch_size, lr, weight_decay,
-#                                               lr_step_size, lr_gamma, patience, tolerance, all_concept_labels, impose_negatives):
-#     """
-#     Fine-tunes a set of linear classifiers for each concept using top-k% superpatches selected
-#     based on current signed distances from the decision boundary.
 
-#     For each concept, the function filters patches whose activations fall in the top percentile range, 
-#     retrains the classifier on those patches, and updates the weight vector and training logs.
-
-#     Args:
-#         fine_tuning_params (list): List of (per_superpatches, n_epochs) for training.
-#         curr_weights (dict): Current concept -> weight vector.
-#         all_logs (dict): Current concept -> list of logs from previous training rounds.
-#         embeds (torch.Tensor): Patch-level embeddings (n_patches, embed_dim).
-#         curr_dists (pd.DataFrame): Concept-wise signed distances of patches to the decision boundary.
-#         dataset_name (str): Name of the dataset (used for patch filtering).
-#         model_input_size (tuple): Image input size for indexing patch location.
-#         device (str): Device to train on (e.g., 'cuda').
-#         batch_size (int): Mini-batch size for training.
-#         lr (float): Learning rate.
-#         weight_decay (float): L2 regularization.
-#         lr_step_size (int): Step size for learning rate decay.
-#         lr_gamma (float): Multiplicative decay factor for learning rate.
-#         patience (int): Early stopping patience.
-#         tolerance (float): Minimum improvement to continue training.
-#         impose_negatives (bool): If True, selects most negative patches as counterexamples.
-
-#     Returns:
-#         all_logs (dict): Updated logs per concept after all rounds.
-#         curr_weights (dict): Updated weights per concept after fine-tuning.
-#     """
-#     curr_weights = copy.deepcopy(concepts_across_iterations[0])
-#     for i, (per, epochs) in enumerate(fine_tuning_params):
-#         if per == 'init':
-#             continue
-            
-#         print(f"Fine tuning model with top {per*100}% of superpatches")
-#         per_logs = {}
-#         #compute distances using last round of training
-#         curr_dists = compute_signed_distances(embeds, curr_weights, dataset_name, 
-#                                               device, output_file=None, batch_size=512)
-#         for concept, concept_weights in curr_weights.items():
-#             #get the training embeds/labels for the next round of fine-tuning based on per% superpatches
-#             train_embeds, train_labels = filter_concept_by_patch_activations('train', embeds, curr_dists[concept], per,
-#                                         all_concept_labels[concept], dataset_name, model_input_size, impose_negatives)
-#             test_embeds, test_labels = filter_concept_by_patch_activations('test', embeds, curr_dists[concept], per,
-#                                         all_concept_labels[concept], dataset_name, model_input_size, impose_negatives)
-            
-#             # train_embeds, train_all_concept_labels = sort_data_by_split(embeds, all_concept_labels, 'train', dataset_name, model_input_size, 'patch')
-#             # test_embeds, test_all_concept_labels = sort_data_by_split(embeds, all_concept_labels, 'test', dataset_name, model_input_size, 'patch')
-            
-#             print(f"Fine-tuning concept {concept} {len(train_embeds)} training samples, {len(test_embeds)} test samples")
-#             if train_embeds.shape[0] > 0 and test_embeds.shape[0] > 0:                                                       
-#                 train_dl = create_dataloader(train_embeds, train_labels, batch_size, shuffle=True)
-#                 test_dl = create_dataloader(test_embeds, test_labels, batch_size, shuffle=False)
-#                 # train_dl = create_dataloader(train_embeds, train_all_concept_labels[concept], batch_size, shuffle=False)
-#                 # test_dl = create_dataloader(test_embeds, test_all_concept_labels[concept], batch_size, shuffle=False)
-#                 # train_dl, test_dl = create_dataloaders(concept, train_embeds, train_all_concept_labels, test_embeds, test_all_concept_labels, 
-#                 #        batch_size, balance_data=True, balance_negatives=False)
-                
-                
-#                 model = create_linear_model(train_embeds.shape[1], device, weights=concept_weights)
-#                 concept_curr_weights, concept_curr_logs = train_model(train_dl, test_dl, epochs, lr, weight_decay, 
-#                                                     lr_step_size, lr_gamma, patience, tolerance, device, model=model)
-            
-#             per_logs[concept] = concept_curr_logs
-#             curr_weights[concept] = concept_curr_weights
-#         concepts_across_iterations.append(copy.deepcopy(curr_weights))
-#         all_logs.append(per_logs)
-            
-#     return all_logs, concepts_across_iterations
-                
-    
-# def compute_linear_separators_finetuned_w_superpatches(fine_tuning_params, embeds, gt_samples_per_concept, 
-#                                              dataset_name, model_input_size, device='cuda', output_file=None,
-#                                              lr=0.01, batch_size=32, patience=15, 
-#                                              tolerance=3, weight_decay=1e-4, lr_step_size=10, lr_gamma=0.5,
-#                                               balance_data=True, balance_negatives=False, use_gt_labels=True,
-#                                              impose_negatives=False):
-#     """
-#     Trains and fine-tunes linear classifiers for each concept using increasing percentages of 
-#     superpatch activations.
-
-#     The function first trains an initial set of linear classifiers using balanced data, then iteratively
-#     fine-tunes each classifier using the top-k% of patches most activated by the previous round's weights.
-
-#     Args:
-#         fine_tuning_params (list): List of (per_superpatches, n_epochs) for training.
-#         embeds (torch.Tensor): Patch-level embeddings of shape (n_patches, embed_dim).
-#         gt_samples_per_concept (dict): Mapping from concept name to indices of patches with that concept.
-#         dataset_name (str): Name of the dataset (used for patch filtering).
-#         model_input_size (tuple): Size of input images (used for patch indexing).
-#         device (str): Device identifier (e.g., 'cuda').
-#         output_file (str or None): If provided, used to save logs or weights.
-#         lr (float): Learning rate.
-#         batch_size (int): Training batch size.
-#         patience (int): Early stopping patience.
-#         tolerance (float): Minimum improvement threshold for early stopping.
-#         weight_decay (float): Weight decay for regularization.
-#         lr_step_size (int): Step size for LR scheduler.
-#         lr_gamma (float): Decay factor for LR scheduler.
-#         balance_data (bool): Whether to balance classes during initial training.
-#         balance_negatives (bool): Whether to balance negatives specifically during training.
-#         impose_negatives (bool): If True, use most negative activations as negatives during fine-tuning.
-
-#     Returns:
-#         final_logs (dict): Mapping from concept -> list of training logs per fine-tuning round.
-#         final_concept_weights (dict): Mapping from concept -> final learned weight tensor.
-#     """
-#     #create an init model and rn it for a couple epochs
-#     print("Initial Training")
-#     init_weights, init_logs = compute_linear_separators(embeds, gt_samples_per_concept, dataset_name, 'patch', model_input_size, 
-#                               device=device, output_file=None, lr=lr, epochs=fine_tuning_params[0][1], batch_size=batch_size,
-#                               patience=patience, 
-#                               tolerance=tolerance, weight_decay=weight_decay, lr_step_size=lr_step_size, lr_gamma=lr_gamma,
-#                               balance_data=balance_data, balance_negatives=balance_negatives) 
-    
-#     if use_gt_labels: #use actual labels
-#         all_concept_labels = create_binary_labels(embeds.shape[0], gt_samples_per_concept)
-#     else: #consider only superpatches as 'positive' examples
-#         all_concept_labels = {concept:None for concept in concept_names}
-        
-#     final_logs, concepts_across_iterations = finetune_linear_separators_w_superpatches(fine_tuning_params, [init_weights],
-#                                                                                        [init_logs], 
-#                                                                                   embeds, dataset_name, 
-#                                                                                   model_input_size, device, batch_size, lr,
-#                                                                                   weight_decay,
-#                                                                                   lr_step_size, lr_gamma, patience, tolerance,
-#                                                                                   all_concept_labels, impose_negatives)
-#     if output_file:
-#         out = f'finetuned_{fine_tuning_params}_{output_file}'
-#         if impose_negatives:
-#             out = 'impose_neg_' + out
-#         if use_gt_labels:
-#             out = 'gtlabels_'+ out
-            
-#         torch.save(concepts_across_iterations, f'Concepts/{dataset_name}/{out}')
-#         print(f"Concepts saved to Concepts/{dataset_name}/{out} :)")
-#         torch.save(final_logs, f'Concepts/{dataset_name}/logs_{out}')
-#         print(f"Logs saved to Concepts/{dataset_name}/logs_{out}")
-        
-#     return concepts_across_iterations, final_logs
-    
-        
-###For Computing Similarity Metrics###
-# def compute_cosine_sims(embeddings, concepts, output_file, dataset_name, device, batch_size=32):
-#     """
-#     Compute cosine similarity between each image embedding and each concept vector in batches,
-#     and save the resulting DataFrame to a CSV file.
-
-#     Args:
-#         embeddings (torch.Tensor): Tensor of image embeddings of shape (n_samples, n_features).
-#         concepts (dict): Mapping from concept names to their embedding tensors.
-#         output_file (str): Filename to save the cosine similarities.
-#         dataset_name (str): The name of the dataset.
-#         device (torch.device or str): Device on which to perform computations.
-#         batch_size (int): Number of images to process per batch.
-
-#     Returns:
-#         pd.DataFrame: DataFrame with one row per image and one column per concept.
-#     """
-#     if dataset_name == 'Coco' and 'kmeans' not in output_file:
-#         concept_keys = filter_coco_concepts(list(concepts.keys()))
-#     else:
-#         concept_keys = list(concepts.keys())
-               
-#     # Move embeddings and concept embeddings to the specified device
-#     all_concept_embeddings = {k: v.to(device) for k, v in concepts.items() if k in concept_keys}
-    
-#     # Create a tensor for all concept embeddings in a fixed order
-#     all_concept_embeddings_tensor = torch.stack([all_concept_embeddings[k] for k in concept_keys])
-    
-#     cosine_similarity_rows = []
-#     n_images = embeddings.shape[0]
-    
-#     for i in tqdm(range(0, n_images, batch_size), desc="Processing batches"):
-#         # Get batch embeddings
-#         batch_embeddings = embeddings[i:i+batch_size]
-#         batch_embeddings = batch_embeddings.to(device)
-#         # Compute cosine similarity in a vectorized way:
-#         # batch_embeddings: (batch_size, n_features)
-#         # all_concept_embeddings_tensor: (n_concepts, n_features)
-#         # After unsqueezing and computing similarity, result shape: (batch_size, n_concepts)
-#         cosine_similarities = F.cosine_similarity(
-#             batch_embeddings.unsqueeze(1), 
-#             all_concept_embeddings_tensor.unsqueeze(0), 
-#             dim=2
-#         )
-#         # Move the result to CPU and convert to list of rows
-#         batch_sims = cosine_similarities.cpu().tolist()
-#         # Create dictionary rows where keys are concept names
-#         batch_rows = [dict(zip(concept_keys, row)) for row in batch_sims]
-#         cosine_similarity_rows.extend(batch_rows)
-    
-#     # Create the DataFrame from all similarity rows
-#     cosine_similarity_df = pd.DataFrame(cosine_similarity_rows)
-    
-#     # Save the DataFrame if an output filename is provided
-#     if output_file and output_file != 'kmeans':
-#         base_path = f'Cosine_Similarities/{dataset_name}/'
-#         output_path = os.path.join(base_path, output_file)
-#         cosine_similarity_df.to_csv(output_path, index=False)
-#         print(f"Cosine similarity results saved at {output_path}")
-    
-#     return cosine_similarity_df
-
-def write_batch_cosine_sims(writer, embeddings, i, batch_size, device, 
-                            all_concept_embeddings_tensor, concept_keys):
-    """
-    Writes a batch of cosine similarities to CSV using a given writer.
-
-    Args:
-        writer (csv.DictWriter): Open CSV writer
-        concept_keys (list of str): Concept names in the correct order
-        cosine_sim_tensor (torch.Tensor): Tensor of shape [batch_size, num_concepts]
-    """
-    batch_embeddings = embeddings[i:i+batch_size].to(device)
-
-    cosine_similarities = F.cosine_similarity(
-        batch_embeddings.unsqueeze(1),
-        all_concept_embeddings_tensor.unsqueeze(0),
-        dim=2
-    )
-    batch_sims = cosine_similarities.cpu().tolist()
-    for row in batch_sims:
-        writer.writerow(dict(zip(concept_keys, row)))
-    del batch_embeddings, cosine_similarities, batch_sims
-        
-
-def compute_cosine_sims(embeddings, concepts, output_file, dataset_name, device, scratch_dir='', batch_size=32, chunk_if_larger_gb=10):
-    if dataset_name == 'Coco' and 'kmeans' not in output_file:
-        concept_keys = filter_coco_concepts(list(concepts.keys()))
-    else:
-        concept_keys = list(concepts.keys())
-
-    all_concept_embeddings = {k: v.to(device) for k, v in concepts.items() if k in concept_keys}
-    all_concept_embeddings_tensor = torch.stack([all_concept_embeddings[k] for k in concept_keys])
-
-    base_path = f'{scratch_dir}Cosine_Similarities/{dataset_name}/'
-    os.makedirs(base_path, exist_ok=True)
-    
-    # Always save as chunks
-    if chunk_if_larger_gb is not None:
-        bytes_per_value = 8  # Average bytes per CSV value
-        bytes_per_gb = 1024 * 1024 * 1024
-        total_values = embeddings.shape[0] * len(concept_keys)
-        estimated_size_gb = (total_values * bytes_per_value) / bytes_per_gb
-        
-        # Calculate number of chunks needed
-        if estimated_size_gb > chunk_if_larger_gb:
-            num_chunks = int(np.ceil(estimated_size_gb / chunk_if_larger_gb))
-            print(f"Estimated CSV size {estimated_size_gb:.2f}GB exceeds {chunk_if_larger_gb}GB threshold")
-        else:
-            num_chunks = 1
-            print(f"Estimated CSV size {estimated_size_gb:.2f}GB - saving as 1 chunk")
-            
-        rows_per_chunk = embeddings.shape[0] // num_chunks
-        print(f"Saving as {num_chunks} chunk(s)")
-        
-        for chunk_idx in range(num_chunks):
-            start_row = chunk_idx * rows_per_chunk
-            end_row = (chunk_idx + 1) * rows_per_chunk if chunk_idx < num_chunks - 1 else embeddings.shape[0]
-            
-            chunk_output_file = output_file.replace('.csv', f'_chunk_{chunk_idx}.csv')
-            chunk_output_path = os.path.join(base_path, chunk_output_file)
-            
-            print(f"Processing chunk {chunk_idx}: rows {start_row}-{end_row}")
-            
-            with open(chunk_output_path, mode='w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=concept_keys)
-                writer.writeheader()
-                
-                with torch.no_grad():
-                    for i in tqdm(range(start_row, end_row, batch_size), 
-                                desc=f"Computing cosine similarities (chunk {chunk_idx})"):
-                        write_batch_cosine_sims(writer, embeddings, i, batch_size, device, 
-                                               all_concept_embeddings_tensor, concept_keys)
-            
-            print(f"Chunk {chunk_idx} saved to {chunk_output_path}")
-        
-        print(f"All {num_chunks} chunk(s) saved successfully")
-        return
-    
-    # Save as single file (only if chunk_if_larger_gb is None)
-    output_path = os.path.join(base_path, output_file)
-    with open(output_path, mode='w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=concept_keys)
-        writer.writeheader()
-
-        with torch.no_grad():
-            for i in tqdm(range(0, embeddings.shape[0], batch_size), desc="Computing cosine similarities"):
-                write_batch_cosine_sims(writer, embeddings, i, batch_size, device, 
-                                       all_concept_embeddings_tensor, concept_keys)
-    print(f"Cosine similarity results saved at {output_path}")
-
-
-def write_signed_distance_batch_to_csv(writer, cluster_ids, batch_embeds, cluster_weights, device):
-    """
-    Vectorized version: Computes and writes signed distances for a batch to a CSV writer.
-
-    Args:
-        writer (csv.DictWriter): CSV writer object
-        cluster_ids (list): Cluster IDs as strings (column names)
-        batch_embeds (Tensor): [B, D] embeddings
-        cluster_weights (dict): cluster_id (str) -> weight tensor (on CPU)
-        device (str): 'cuda' or 'cpu'
-    """
-    # Stack all weight vectors: [C, D]
-    weight_matrix = torch.stack([cluster_weights[cid] for cid in cluster_ids]).to(device).to(batch_embeds.dtype)
-
-    # Normalize weight vectors: [C, D]
-    weight_matrix = torch.nn.functional.normalize(weight_matrix, dim=1)
-
-    # Normalize embeddings: [B, D]
-    batch_embeds = torch.nn.functional.normalize(batch_embeds, dim=1)
-
-    # Compute cosine similarities in one go: [B, C]
-    sims = batch_embeds @ weight_matrix.T
-
-    # Convert to list of dicts (one row per sample)
-    for row in sims.cpu().tolist():
-        writer.writerow(dict(zip(cluster_ids, row)))
-        
-def write_dist_row(writer, embeds, i, batch_size, device, weight_matrix, concept_ids):
-    batch = embeds[i:i+batch_size].to(device)
-    sims = batch @ weight_matrix.T
-    for row in sims.cpu().tolist():
-        writer.writerow(dict(zip(concept_ids, row)))
-    del batch
-    torch.cuda.empty_cache()
-        
-def compute_signed_distances(embeds, concepts, dataset_name, device, output_file, scratch_dir, batch_size=100, chunk_if_larger_gb=10):
-    """
-    Computes signed distances between embeddings and cluster directions with chunking support.
-
-    Args:
-        embeds (Tensor): [N, D] embeddings
-        concepts (dict): concept_id -> weight tensor (1D)
-        dataset_name (str): Used for output folder
-        device (str): 'cuda' or 'cpu'
-        output_file (str): Filename to write to
-        scratch_dir (str): Scratch directory prefix
-        batch_size (int): Batch size for processing
-        chunk_if_larger_gb (float): If file size exceeds this, save as chunks. Set to None to disable chunking.
-    """
-    concept_ids = [str(k) for k in concepts.keys()]
-    output_dir = os.path.join(f"{scratch_dir}Distances", dataset_name)
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Always save as chunks
-    if chunk_if_larger_gb is not None:
-        bytes_per_value = 8  # Average bytes per CSV value
-        bytes_per_gb = 1024 * 1024 * 1024
-        total_values = embeds.shape[0] * len(concept_ids)
-        estimated_size_gb = (total_values * bytes_per_value) / bytes_per_gb
-        
-        # Calculate number of chunks needed
-        if estimated_size_gb > chunk_if_larger_gb:
-            num_chunks = int(np.ceil(estimated_size_gb / chunk_if_larger_gb))
-            print(f"Estimated CSV size {estimated_size_gb:.2f}GB exceeds {chunk_if_larger_gb}GB threshold")
-        else:
-            num_chunks = 1
-            print(f"Estimated CSV size {estimated_size_gb:.2f}GB - saving as 1 chunk")
-            
-        rows_per_chunk = embeds.shape[0] // num_chunks
-        print(f"Saving as {num_chunks} chunk(s)")
-        
-        # Prepare weight matrix outside loop
-        weight_matrix = torch.stack([concepts[cid] for cid in concept_ids]).to(device).to(embeds.dtype)
-        
-        for chunk_idx in range(num_chunks):
-            start_row = chunk_idx * rows_per_chunk
-            end_row = (chunk_idx + 1) * rows_per_chunk if chunk_idx < num_chunks - 1 else embeds.shape[0]
-            
-            chunk_output_file = output_file.replace('.csv', f'_chunk_{chunk_idx}.csv')
-            chunk_output_path = os.path.join(output_dir, chunk_output_file)
-            
-            print(f"Processing chunk {chunk_idx}: rows {start_row}-{end_row}")
-            
-            with open(chunk_output_path, mode='w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=concept_ids)
-                writer.writeheader()
-                
-                with torch.no_grad():
-                    for i in tqdm(range(start_row, end_row, batch_size), 
-                                desc=f"Writing signed distances (chunk {chunk_idx})"):
-                        write_dist_row(writer, embeds, i, batch_size, device, weight_matrix, concept_ids)
-            
-            print(f"Chunk {chunk_idx} saved to {chunk_output_path}")
-        
-        print(f"All {num_chunks} chunk(s) saved successfully")
-        return
-
-    # Save as single file (only if chunk_if_larger_gb is None)
-    output_path = os.path.join(output_dir, output_file)
-    
-    # Prepare weight matrix outside loop
-    weight_matrix = torch.stack([concepts[cid] for cid in concept_ids]).to(device).to(embeds.dtype)
-
-    with open(output_path, mode='w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=concept_ids)
-        writer.writeheader()
-
-        with torch.no_grad():
-            for i in tqdm(range(0, embeds.shape[0], batch_size), desc="Writing signed distances"):
-                write_dist_row(writer, embeds, i, batch_size, device, weight_matrix, concept_ids)
-
-    print(f"Saved signed distances to: {output_path}")
-    
-# def compute_signed_distances(embeds, cluster_weights, dataset_name, device, output_file, scratch_dir, batch_size=100):
-#     """
-#     Computes signed distances between embeddings and cluster directions.
-
-#     Args:
-#         embeds (Tensor): [N, D] embeddings
-#         cluster_weights (dict): cluster_id -> weight tensor (1D)
-#         dataset_name (str): Used for output folder
-#         device (str): 'cuda' or 'cpu'
-#         output_file (str): Filename to write to
-#         batch_size (int): Batch size for processing
-#     """
-#     cluster_ids = [str(k) for k in cluster_weights.keys()]
-#     output_path = os.path.join(f"{scratch_dir}Distances", dataset_name, output_file)
-#     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-#     with open(output_path, mode='w', newline='') as f:
-#         writer = csv.DictWriter(f, fieldnames=cluster_ids)
-#         writer.writeheader()
-
-#         with torch.no_grad():
-#             for i in tqdm(range(0, embeds.shape[0], batch_size), desc="Writing signed distances"):
-#                 batch = embeds[i:i+batch_size].to(device)
-#                 write_signed_distance_batch_to_csv(writer, cluster_ids, batch, cluster_weights, device)
-#                 del batch
-#                 torch.cuda.empty_cache()
-
-#     print(f"Saved signed distances to: {output_path}")
-    
-
-# def compute_signed_distances(embeds, concept_weights, dataset_name, device, output_file=None, batch_size=100):
-#     """
-#     Compute signed distances for each test sample in batches and save as a DataFrame.
-
-#     Args:
-#         embeds (torch.Tensor): Tensor of shape (N, D), test embeddings.
-#         concept_weights (dict): Dict mapping concept names to learned weight vectors.
-#         dataset_name (str): Name of the dataset.
-#         device (str): Device to run computations on ('cuda' or 'cpu').
-#         output_file (str, optional): File path to save the DataFrame.
-#         batch_size (int, optional): Number of samples per batch. Default is 100.
-
-#     Returns:
-#         pd.DataFrame: DataFrame where rows are samples and columns are concepts.
-#     """
-#     num_samples = embeds.shape[0]
-#     concept_names = list(concept_weights.keys())
-#     if dataset_name == 'Coco' and output_file is not None and 'kmeans' not in output_file:
-#         concept_names = filter_coco_concepts(concept_names)
-
-#     # Storage for signed distances (kept on CPU)
-#     signed_distances = {name: [] for name in concept_names}
-
-#     num_batches = (num_samples + batch_size - 1) // batch_size  # Calculate number of batches
-
-#     with torch.no_grad():  # Disable autograd for memory efficiency
-#         for i in tqdm(range(num_batches), desc="Computing signed distances"):
-#             batch_embeds = embeds[i * batch_size : (i + 1) * batch_size].to(device)  # Move only batch to GPU
-
-#             for concept_name, weight_vector in concept_weights.items():
-#                 if concept_name in concept_names:
-#                     weight_vector = weight_vector.to(device).to(batch_embeds.dtype)  # Move to GPU per batch
-#                     norm_weight = torch.norm(weight_vector, p=2)
-#                     batch_distances = (batch_embeds @ weight_vector) / norm_weight
-#                     signed_distances[concept_name].append(batch_distances.cpu())  # Move back to CPU
-
-#                     del weight_vector  # Free memory
-#                     torch.cuda.empty_cache()  # Clear unused GPU memory
-
-#             del batch_embeds  # Free batch memory
-#             torch.cuda.empty_cache()  # Extra safety
-
-#     # Concatenate and create DataFrame
-#     signed_dist_df = pd.DataFrame({k: torch.cat(v, dim=0).numpy() for k, v in signed_distances.items()})
-
-#     if output_file is not None:
-#         output_path = f"Distances/{dataset_name}/{output_file}"
-#         signed_dist_df.to_csv(output_path, index=False)
-#         print(f"Signed distances saved to {output_path}")
-
-#     return signed_dist_df
-
-
-def compute_zscore_stats(dataset_name, dists_file, con_label, scratch_dir=""):
-    """
-    Computes mean and std per concept from a CSV of cosine similarities or distances.
-
-    Args:
-        calibration_csv_path (str): Path to CSV with shape [N_samples, N_concepts]
-
-    Returns:
-        pd.Series, pd.Series: (mean_per_concept, std_per_concept)
-    """
-    zscore_path = f'{scratch_dir}Distances/{dataset_name}/zscores_{con_label}.pt'
-    if os.path.exists(zscore_path):
-        print(f"Already computed z scores for {dataset_name}")
-        return
-    raw_dists = pd.read_csv(f'{scratch_dir}Distances/{dataset_name}/{dists_file}')
-    mean = raw_dists.mean(axis=0)
-    std = raw_dists.std(axis=0).replace(0, 1e-6)  # avoid divide-by-zero
-    torch.save({'mean':mean, 'std':std},
-               f'{scratch_dir}Distances/{dataset_name}/zscores_{con_label}.pt')
-    print(f'Z scores saved to {scratch_dir}Distances/{dataset_name}/zscores_{con_label}.pt')
-
-
-def apply_zscore_normalization(dists_file, dataset_name, con_label, scratch_dir=""):
-    """
-    Applies z-score normalization to activations using precomputed stats.
-
-    Args:
-        activation_csv_path (str): Path to CSV of activations to normalize
-        mean (pd.Series): Mean per concept from calibration set
-        std (pd.Series): Std per concept from calibration set
-
-    Returns:
-        pd.DataFrame: Z-scored activations, same shape as input
-    """
-    if 'Cal' in dataset_name:
-        zscore_path = f'{scratch_dir}Distances/{dataset_name}/zscores_{con_label}.pt'
-    else:
-        zscore_path = f'{scratch_dir}Distances/{dataset_name}-Cal/zscores_{con_label}.pt'
-           
-    zscore_stats = torch.load(zscore_path, weights_only=False)
-    mean, std = zscore_stats['mean'], zscore_stats['std']
-    
-    raw_dists = pd.read_csv(f'{scratch_dir}Distances/{dataset_name}/{dists_file}')
-    zscored_dists = (raw_dists - mean) / std
-        
-    output_path = f'{scratch_dir}Distances/{dataset_name}/zscored_{dists_file}'
-    zscored_dists.to_csv(output_path, index=False)
-    print(f'Z-scored distances saved to {output_path}')
-    return zscored_dists
-    
 
 ### Functions for Visualizing Patch Methods ###
 

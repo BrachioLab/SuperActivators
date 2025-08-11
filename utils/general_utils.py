@@ -28,6 +28,21 @@ def retrieve_image(img_idx, dataset_name, test_only=False):
     return image
 
 
+def create_image_loader_function(dataset_name):
+    """
+    Creates a function that loads images on demand by index.
+    
+    Args:
+        dataset_name (str): Name of the dataset.
+        
+    Returns:
+        callable: A function that takes an image index and returns a PIL Image.
+    """
+    def load_image(image_index):
+        return retrieve_image(image_index, dataset_name)
+    return load_image
+
+
 def load_images(dataset_name, model_input_size=None):
     """
     Load images from a dataset.
@@ -47,10 +62,8 @@ def load_images(dataset_name, model_input_size=None):
     all_images, train_images, test_images = [], [], []
     for idx, info in tqdm(metadata.iterrows(), total=len(metadata), desc="Loading Images"):
         image_filename = info['image_path']
-        try:
-            image = Image.open(f'/scratch/cgoldberg/{dataset_name}/{image_filename}').convert("RGB")
-        except:
-            image = Image.open(f'../Data/{dataset_name}/{image_filename}').convert("RGB")
+        # Always load from local Data directory
+        image = Image.open(f'../Data/{dataset_name}/{image_filename}').convert("RGB")
         if model_input_size: #reshape image if it's bigger than the model input size (could deal with this through tiles)
             new_width, new_height = get_resized_dims_w_same_ar(image.size, model_input_size)
             image = image.resize((new_width, new_height), Image.LANCZOS)
@@ -63,7 +76,13 @@ def load_images(dataset_name, model_input_size=None):
                 train_images.append(image)
             else:
                 test_images.append(image)
-    print(f"Loaded {len(all_images)} images.")
+    print(f"Loaded {len(all_images)} images from local Data directory.")
+    
+    # Check for duplicates in the metadata
+    if len(metadata) != len(metadata['image_path'].unique()):
+        print(f"WARNING: Duplicate image paths found in metadata!")
+        print(f"  - Total rows: {len(metadata)}")
+        print(f"  - Unique images: {len(metadata['image_path'].unique())}")
 
     return all_images, train_images, test_images
 
@@ -373,6 +392,69 @@ def get_split_df(dataset_name):
     return split_df
 
 
+def get_global_index_from_split_index(dataset_name, split_name, nth_in_split):
+    """
+    Converts the nth sample in a specific split to its global index in the dataset.
+    
+    Args:
+        dataset_name (str): Name of the dataset.
+        split_name (str): Split name ('train', 'test', 'cal', etc.).
+        nth_in_split (int): The nth sample within the specified split (0-indexed).
+        
+    Returns:
+        int: Global index of the sample in the full dataset.
+        
+    Example:
+        # Get the global index of the 5th test sample
+        global_idx = get_global_index_from_split_index('CLEVR', 'test', 4)
+    """
+    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+    
+    # Get all indices for the specified split
+    split_indices = metadata[metadata['split'] == split_name].index
+    
+    if nth_in_split >= len(split_indices):
+        raise ValueError(f"Index {nth_in_split} out of bounds for split '{split_name}' "
+                        f"which has {len(split_indices)} samples")
+    
+    # Return the global index
+    return split_indices[nth_in_split]
+
+
+def get_split_index_from_global_index(dataset_name, global_index):
+    """
+    Converts a global index to its position within its split.
+    
+    Args:
+        dataset_name (str): Name of the dataset.
+        global_index (int): Global index in the full dataset.
+        
+    Returns:
+        tuple: (split_name, nth_in_split) where split_name is the split the sample belongs to
+               and nth_in_split is its 0-indexed position within that split.
+               
+    Example:
+        # Get split info for global index 1000
+        split_name, nth = get_split_index_from_global_index('CLEVR', 1000)
+        # Returns e.g., ('test', 42) meaning it's the 43rd test sample
+    """
+    metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+    
+    if global_index >= len(metadata):
+        raise ValueError(f"Global index {global_index} out of bounds for dataset with {len(metadata)} samples")
+    
+    # Get the split for this index
+    split_name = metadata.iloc[global_index]['split']
+    
+    # Get all indices for this split
+    split_indices = metadata[metadata['split'] == split_name].index
+    
+    # Find the position within the split
+    nth_in_split = list(split_indices).index(global_index)
+    
+    return split_name, nth_in_split
+
+
 def create_binary_labels(D, gt_samples_per_concept):
     """
     Create binary labels for each embedding based on concept indices.
@@ -386,8 +468,11 @@ def create_binary_labels(D, gt_samples_per_concept):
     """
     all_concept_labels = {}
     for concept, samples in gt_samples_per_concept.items():
-        concept_labels = torch.zeros(D)
-        concept_labels[list(samples)] = 1
+        concept_labels = torch.zeros(D, dtype=torch.float32)
+        if len(samples) > 0:
+            # Convert to tensor for faster indexing
+            indices = torch.tensor(list(samples), dtype=torch.long)
+            concept_labels[indices] = 1
         all_concept_labels[concept] = concept_labels
     return all_concept_labels
 

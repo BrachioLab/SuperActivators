@@ -8,7 +8,8 @@ from collections import defaultdict
 from itertools import product
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from utils.compute_concepts_utils import gpu_kmeans, compute_cosine_sims, compute_signed_distances, compute_linear_separators
+from utils.compute_concepts_utils import gpu_kmeans, compute_linear_separators
+from utils.activation_utils import compute_cosine_sims, compute_signed_distances
 from utils.unsupervised_utils import compute_detection_metrics_over_percentiles_allpairs, \
 find_best_clusters_per_concept_from_detectionmetrics, filter_and_save_best_clusters, get_matched_concepts_and_data, \
 compute_concept_thresholds_over_percentiles_all_pairs

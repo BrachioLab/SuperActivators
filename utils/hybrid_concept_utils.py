@@ -93,14 +93,12 @@ def get_sample_ranges(dataset_name, model_input_size, total_embeddings):
     """Get the patch ranges for each sample (image/paragraph)."""
     if model_input_size[0] == 'text':
         # For text, load token counts to determine sample boundaries
-        # First try model-specific token counts, fall back to generic if not found
-        model_specific_token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
-        generic_token_counts_file = f'GT_Samples/{dataset_name}/token_counts.pt'
+        token_counts_file = f'GT_Samples/{dataset_name}/token_counts_inputsize_{model_input_size}.pt'
         
-        if os.path.exists(model_specific_token_counts_file):
-            token_counts = torch.load(model_specific_token_counts_file, weights_only=False)
-        else:
-            token_counts = torch.load(generic_token_counts_file, weights_only=False)
+        if not os.path.exists(token_counts_file):
+            raise FileNotFoundError(f"Token counts file not found: {token_counts_file}")
+        
+        token_counts = torch.load(token_counts_file, weights_only=False)
         sample_ranges = []
         start_idx = 0
         for sent_idx, word_token_counts in enumerate(token_counts):
@@ -151,7 +149,7 @@ def filter_relevant_patches(indices, dataset_name, model_input_size):
         # For images, use the existing filter function
         return filter_patches_by_image_presence(indices, dataset_name, model_input_size).tolist()
 
-def compute_hybrid_concept_vectors_chunked(concept_vectors, superdetectors, embeddings_path, sample_ranges, alpha, dataset_name, model_input_size, device='cuda'):
+def compute_hybrid_concept_vectors(concept_vectors, superdetectors, embeddings_path, sample_ranges, alpha, dataset_name, model_input_size, device='cuda'):
     """
     Computation of hybrid concept vectors using chunked embeddings.
     
@@ -258,7 +256,7 @@ def compute_hybrid_concept_vectors_chunked(concept_vectors, superdetectors, embe
     
     return hybrid_concepts
 
-def compute_hybrid_thresholds_for_concepts_chunked(activations, gt_samples_per_concept_cal, percentile, dataset_name, con_label, alpha):
+def compute_hybrid_thresholds_for_concepts(activations, gt_samples_per_concept_cal, percentile, dataset_name, con_label, alpha):
     """
     Compute thresholds for hybrid concepts using calibration set at given percentile.
     Works at patch level for inversion F1.
@@ -304,7 +302,7 @@ def compute_hybrid_thresholds_for_concepts_chunked(activations, gt_samples_per_c
     
     return thresholds
 
-def evaluate_hybrid_performance_with_thresholds_chunked(activations, thresholds, gt_patches_per_concept, gt_samples_per_concept_test, percentile, dataset_name, con_label, alpha, model_input_size, total_embeddings):
+def evaluate_hybrid_performance_with_thresholds(activations, thresholds, gt_patches_per_concept, gt_samples_per_concept_test, percentile, dataset_name, con_label, alpha, model_input_size, total_embeddings):
     """
     Evaluate F1 performance using same patch filtering and test set as baseline.
     
@@ -443,7 +441,7 @@ def get_concept_label(model_name, method):
     elif method == 'linsep':
         return f'{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100'
 
-def run_hybrid_analysis_for_config_chunked(model_name, model_input_size, dataset_name, method, detect_percentile, invert_percentile, alpha_values, device='cuda', scratch_dir=''):
+def run_hybrid_analysis_for_config(model_name, model_input_size, dataset_name, method, detect_percentile, invert_percentile, alpha_values, device='cuda', scratch_dir=''):
     """
     Run hybrid concept analysis for a single configuration using chunked processing.
     
@@ -503,7 +501,7 @@ def run_hybrid_analysis_for_config_chunked(model_name, model_input_size, dataset
         for alpha in tqdm(alpha_values, desc=f"   Alpha sweep for {method}", leave=False):
             with memory_efficient_context(device):
                 # 1. Compute hybrid concept vectors using chunked processing
-                hybrid_concepts = compute_hybrid_concept_vectors_chunked(
+                hybrid_concepts = compute_hybrid_concept_vectors(
                     concept_vectors, superdetectors, embeddings_path, sample_ranges, alpha, dataset_name, model_input_size, device
                 )
        
@@ -515,13 +513,13 @@ def run_hybrid_analysis_for_config_chunked(model_name, model_input_size, dataset
                 
                 # 3. Compute thresholds using calibration set
                 print(f"   🎚️  Computing thresholds...")
-                thresholds = compute_hybrid_thresholds_for_concepts_chunked(
+                thresholds = compute_hybrid_thresholds_for_concepts(
                     hybrid_activations, gt_samples_per_concept_cal, invert_percentile, dataset_name, con_label, alpha
                 )
                 
                 # 4. Evaluate performance on test set
                 print(f"   📊 Evaluating performance...")
-                all_metrics = evaluate_hybrid_performance_with_thresholds_chunked(
+                all_metrics = evaluate_hybrid_performance_with_thresholds(
                     hybrid_activations, thresholds, gt_patches_per_concept, gt_samples_per_concept_test, invert_percentile, dataset_name, con_label, alpha, model_input_size, total_embeddings
                 )
                 

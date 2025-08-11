@@ -6,13 +6,15 @@ from transformers import CLIPModel, AutoProcessor, MllamaForConditionalGeneratio
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.general_utils import load_images
-from utils.compute_concepts_utils import get_clip_cls_embeddings, get_clip_patch_embeddings, compute_batch_embeddings, compute_avg_concept_vectors, compute_cosine_sims, get_llama_patch_embeddings, get_llama_cls_embeddings
+from utils.compute_concepts_utils import compute_avg_concept_vectors
+from utils.activation_utils import compute_cosine_sims
+from utils.embedding_utils import compute_batch_embeddings
 
 
 PERCENT_THRU_MODEL = 100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DATASET_NAMES = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces']
-scratch_dir=''
+scratch_dir='/scratch/cgoldberg/' 
 
 
 #for clip
@@ -24,7 +26,7 @@ CLIP_INPUT_IMAGE_SIZE = (224, 224)
 
 # #for llama
 llama_model_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-LLAMA_MODEL = MllamaForConditionalGeneration.from_pretrained(llama_model_id, torch_dtype=torch.float16, device_map="auto")
+LLAMA_MODEL = MllamaForConditionalGeneration.from_pretrained(llama_model_id, torch_dtype=torch.float16).to(DEVICE)
 LLAMA_PROCESSOR = AutoProcessor.from_pretrained(llama_model_id)
 LLAMA_MODEL.eval()
 LLAMA_INPUT_IMAGE_SIZE = (560, 560)
@@ -33,49 +35,29 @@ LLAMA_INPUT_IMAGE_SIZE = (560, 560)
 if __name__ == "__main__":
     for DATASET_NAME in DATASET_NAMES:
         print("Dataset", DATASET_NAME)
-        llama_images, _, _ = load_images(dataset_name=DATASET_NAME, model_input_size=LLAMA_INPUT_IMAGE_SIZE)
+        
+        # Process CLIP model - compute both cls and patch embeddings in one pass
+        print("\n=== Processing CLIP Model ===")
         clip_images, _, _ = load_images(dataset_name=DATASET_NAME, model_input_size=CLIP_INPUT_IMAGE_SIZE)
         
-        ####### CLS
-        ## CLIP
-        print("clip cls")
-        EMBEDDINGS_FILE = f'CLIP_cls_embeddings_percentthrumodel_{PERCENT_THRU_MODEL}.pt'
-        compute_batch_embeddings(clip_images, get_clip_cls_embeddings, CLIP_MODEL, CLIP_PROCESSOR, DEVICE, 
-                                        percent_thru_model=PERCENT_THRU_MODEL, dataset_name=DATASET_NAME,
-                                        embeddings_file=EMBEDDINGS_FILE, model_input_size=CLIP_INPUT_IMAGE_SIZE,
-                                        batch_size=100, scratch_dir=scratch_dir)
+        print(f"Computing both CLS and patch embeddings for CLIP")
+        compute_batch_embeddings(clip_images, CLIP_MODEL, CLIP_PROCESSOR, DEVICE, 
+                                percent_thru_model=PERCENT_THRU_MODEL, dataset_name=DATASET_NAME,
+                                model_input_size=CLIP_INPUT_IMAGE_SIZE,
+                                batch_size=100, scratch_dir=scratch_dir)
+        
         torch.cuda.empty_cache()            
         torch.cuda.ipc_collect()
         
-        ## Llama
-        print("llama cls")
-        EMBEDDINGS_FILE = f'Llama_cls_embeddings_percentthrumodel_{PERCENT_THRU_MODEL}.pt'
-        compute_batch_embeddings(llama_images, get_llama_cls_embeddings, LLAMA_MODEL, LLAMA_PROCESSOR, DEVICE, 
-                                        percent_thru_model=PERCENT_THRU_MODEL, dataset_name=DATASET_NAME,
-                                        embeddings_file=EMBEDDINGS_FILE, model_input_size=LLAMA_INPUT_IMAGE_SIZE,
-                                         batch_size=2, scratch_dir=scratch_dir)
-        torch.cuda.empty_cache()            
-        torch.cuda.ipc_collect()
+        # Process Llama model - compute both cls and patch embeddings in one pass
+        print("\n=== Processing Llama Model ===")
+        llama_images, _, _ = load_images(dataset_name=DATASET_NAME, model_input_size=LLAMA_INPUT_IMAGE_SIZE)
         
+        print(f"Computing both CLS and patch embeddings for Llama")
+        compute_batch_embeddings(llama_images, LLAMA_MODEL, LLAMA_PROCESSOR, DEVICE, 
+                                percent_thru_model=PERCENT_THRU_MODEL, dataset_name=DATASET_NAME,
+                                model_input_size=LLAMA_INPUT_IMAGE_SIZE,
+                                batch_size=16, scratch_dir=scratch_dir)  # Smaller batch for Llama
         
-        ####### Patch
-        ## CLIP
-        print("clip patch")
-        EMBEDDINGS_FILE = f'CLIP_patch_embeddings_percentthrumodel_{PERCENT_THRU_MODEL}.pt'
-        compute_batch_embeddings(clip_images, get_clip_patch_embeddings, CLIP_MODEL, CLIP_PROCESSOR, DEVICE, 
-                                        percent_thru_model=PERCENT_THRU_MODEL, dataset_name=DATASET_NAME,
-                                        model_input_size=CLIP_INPUT_IMAGE_SIZE,
-                                        embeddings_file=EMBEDDINGS_FILE, batch_size=100,
-                                        scratch_dir=scratch_dir)
-        torch.cuda.empty_cache()            
-        torch.cuda.ipc_collect()
-        
-        ### Llama
-        print("llama patch")
-        EMBEDDINGS_FILE = f'Llama_patch_embeddings_percentthrumodel_{PERCENT_THRU_MODEL}.pt'
-        compute_batch_embeddings(llama_images, get_llama_patch_embeddings, LLAMA_MODEL, LLAMA_PROCESSOR, DEVICE, 
-                                        percent_thru_model=PERCENT_THRU_MODEL, dataset_name=DATASET_NAME,
-                                        model_input_size=LLAMA_INPUT_IMAGE_SIZE,
-                                        embeddings_file=EMBEDDINGS_FILE, batch_size=2, scratch_dir=scratch_dir)
         torch.cuda.empty_cache()            
         torch.cuda.ipc_collect()

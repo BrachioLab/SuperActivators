@@ -386,13 +386,15 @@ def plot_average_grouped_metrics(data_dict, baseline_dfs, metric, baseline_type,
 F1 Detection 
 
 """""""""""
-def get_per_concept_prompt_scores(dataset_name, metric):
+def get_per_concept_prompt_scores(dataset_name, model_name, metric, split='test'):
     """
     Load prompt detection scores from a saved CSV file for each concept.
 
     Args:
         dataset_name (str): Name of the dataset.
-        metric (str): 'f1', 'tpr', or 'fpr'.
+        model_name (str): Name of the model (for consistency with get_weighted_prompt_score).
+        metric (str): 'f1', 'tpr', 'fpr', 'tnr', 'fnr', 'accuracy', 'fp', 'fn', 'tp', 'tn'.
+        split (str, optional): Dataset split. Defaults to 'test'.
 
     Returns:
         dict: A dictionary mapping concept to its score.
@@ -410,6 +412,11 @@ def get_per_concept_prompt_scores(dataset_name, metric):
     csv_file = os.path.join(prompt_results_dir, csv_files[0])
     df = pd.read_csv(csv_file)
 
+    # Check if the metric exists in the dataframe
+    if metric not in df.columns:
+        print(f"Warning: Metric '{metric}' not found in {csv_file}. Available metrics: {list(df.columns)}")
+        return {}
+
     return filter_concept_dict(dict(zip(df['concept'], df[metric])), dataset_name)
 
 def get_weighted_prompt_score(dataset_name, model_name, metric, split='test'):
@@ -419,13 +426,13 @@ def get_weighted_prompt_score(dataset_name, model_name, metric, split='test'):
     Args:
         dataset_name (str): Name of the dataset.
         model_name (str): Name of the model.
-        metric (str): 'f1', 'tpr', or 'fpr'.
+        metric (str): 'f1', 'tpr', 'fpr', 'tnr', 'fnr', 'accuracy', 'fp', 'fn', 'tp', 'tn'.
         split (str, optional): Dataset split. Defaults to 'test'.
 
     Returns:
         float: The weighted prompt score.
     """
-    per_concept_scores = get_per_concept_prompt_scores(dataset_name, metric)
+    per_concept_scores = get_per_concept_prompt_scores(dataset_name, model_name, metric, split)
 
     # === Load ground-truth counts for weighted average
     if dataset_name == 'Stanford-Tree-Bank' or 'Sarcasm' in dataset_name or 'Emotion' in dataset_name:
@@ -446,15 +453,24 @@ def get_weighted_prompt_score(dataset_name, model_name, metric, split='test'):
     gt_samples_per_concept = filter_concept_dict(gt_samples_per_concept, dataset_name)
     gt_concepts = set(gt_samples_per_concept.keys())
 
-    weighted_sum = 0
-    total_samples = 0
-    for concept, score in per_concept_scores.items():
-        if concept in gt_concepts:
-            count = len(gt_samples_per_concept[concept])
-            weighted_sum += score * count
-            total_samples += count
+    # For count-based metrics (fp, fn, tp, tn), sum them directly
+    if metric in ['fp', 'fn', 'tp', 'tn']:
+        total_count = 0
+        for concept, count in per_concept_scores.items():
+            if concept in gt_concepts:
+                total_count += count
+        return total_count
+    else:
+        # For rate-based metrics, calculate weighted average
+        weighted_sum = 0
+        total_samples = 0
+        for concept, score in per_concept_scores.items():
+            if concept in gt_concepts:
+                count = len(gt_samples_per_concept[concept])
+                weighted_sum += score * count
+                total_samples += count
 
-    return weighted_sum / total_samples if total_samples > 0 else 0.0
+        return weighted_sum / total_samples if total_samples > 0 else 0.0
 
 
 def get_prompt_scores(dataset_name, model_name, metric,
@@ -464,13 +480,13 @@ def get_prompt_scores(dataset_name, model_name, metric,
 
     Args:
         dataset_name: Name of the dataset
-        metric: 'f1', 'tpr', or 'fpr'
+        metric: 'f1', 'tpr', 'fpr', 'tnr', 'fnr', 'accuracy', 'fp', 'fn', 'tp', 'tn'
         weighted_avg: Whether to compute weighted average based on GT sample counts
         split: Dataset split (e.g., 'test')
         model_name: Needed to determine correct input size for gt_samples_per_concept
 
     Returns:
-        Dict of concept -> score (if f1), or scalar for tpr/fpr
+        Dict of concept -> score (if f1), or scalar for other metrics
     """
     if weighted_avg:
         return get_weighted_prompt_score(dataset_name, model_name, metric, split)
@@ -606,12 +622,13 @@ def plot_detection_scores(dataset_name, split, model_name, sample_types, metric=
         gt_samples_per_concept = torch.load(f'GT_Samples/{dataset_name}/gt_samples_per_concept_{split}_inputsize_(560, 560).pt', weights_only=False)
     gt_samples_per_concept = filter_concept_dict(gt_samples_per_concept, dataset_name)
     
-    # Plot prompt scores
-    try:
-        prompt_score = get_weighted_prompt_score(dataset_name, model_name, metric, split)
-        plt.axhline(prompt_score, color='#8B4513', linestyle='-.', linewidth=2, label="Prompt")
-    except Exception:
-        pass
+    # Plot prompt scores (only for rate-based metrics, not counts)
+    if metric not in ['fp', 'fn', 'tp', 'tn']:
+        try:
+            prompt_score = get_weighted_prompt_score(dataset_name, model_name, metric, split)
+            plt.axhline(prompt_score, color='#8B4513', linestyle='-.', linewidth=2, label="Prompt")
+        except Exception:
+            pass
 
     # Baseline CSVs: random, always_yes, always_no
     baseline_style_map = {
@@ -638,13 +655,74 @@ def plot_detection_scores(dataset_name, split, model_name, sample_types, metric=
     for name, con_label in con_labels.items():
         scores = []
         for percentile in percentiles:
-            detection_metrics = torch.load(f'Quant_Results/{dataset_name}/detectionmetrics_per_{percentile}_{con_label}.pt', weights_only=False)
+            # For calibration data, append _cal to con_label
+            if split == 'cal':
+                file_con_label = con_label + '_cal'
+            else:
+                file_con_label = con_label
+                
+            # Check if this is an unsupervised method (kmeans or sae)
+            if 'kmeans' in con_label or 'sae' in con_label:
+                # Unsupervised: use allpairs pattern and CSV format
+                file_path = f'Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{percentile}_{file_con_label}.csv'
+                
+                if not os.path.exists(file_path):
+                    print(f"Warning: File not found - {file_path}")
+                    scores.append(0)  # Default to 0 if file not found
+                    continue
+                    
+                # Load CSV file for unsupervised
+                detection_metrics = pd.read_csv(file_path)
+                
+                # For unsupervised, we need to filter to best matching clusters
+                # Load the best cluster mapping for the appropriate split
+                if split == 'cal':
+                    # For calibration, use the calibration-specific best clusters
+                    best_clusters_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}_cal.pt'
+                else:
+                    # For test/train, use the regular best clusters
+                    best_clusters_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
+                if os.path.exists(best_clusters_path):
+                    best_clusters = torch.load(best_clusters_path, weights_only=False)
+                    # Filter to only the best matching (concept, cluster) pairs
+                    filtered_rows = []
+                    for concept in gt_samples_per_concept:
+                        if concept in best_clusters:
+                            cluster_id = best_clusters[concept]['best_cluster']
+                            # Find the row for this (concept, cluster) pair
+                            row = detection_metrics[detection_metrics['concept'] == f"('{concept}', '{cluster_id}')"]
+                            if not row.empty:
+                                # Create a simplified row with just the concept name
+                                simplified_row = row.iloc[0].copy()
+                                simplified_row['concept'] = concept
+                                filtered_rows.append(simplified_row)
+                    
+                    if filtered_rows:
+                        detection_metrics = pd.DataFrame(filtered_rows)
+                    else:
+                        detection_metrics = pd.DataFrame()  # Empty dataframe if no matches
+                else:
+                    print(f"Warning: Best clusters file not found - {best_clusters_path}")
+                    detection_metrics = pd.DataFrame()
+            else:
+                # Supervised: use original pattern and PT format
+                file_path = f'Quant_Results/{dataset_name}/detectionmetrics_per_{percentile}_{file_con_label}.pt'
+                
+                if not os.path.exists(file_path):
+                    print(f"Warning: File not found - {file_path}")
+                    scores.append(0)  # Default to 0 if file not found
+                    continue
+                    
+                detection_metrics = torch.load(file_path, weights_only=False)
             detection_metrics = detection_metrics[detection_metrics['concept'].isin(gt_samples_per_concept)]
             if weighted_avg:
                 total = sum(len(gt_samples_per_concept[c]) for c in detection_metrics['concept'])
-                score = sum(row[metric] * len(gt_samples_per_concept[row['concept']]) for _, row in detection_metrics.iterrows()) / total
+                if total > 0:
+                    score = sum(row[metric] * len(gt_samples_per_concept[row['concept']]) for _, row in detection_metrics.iterrows()) / total
+                else:
+                    score = 0
             else:
-                score = detection_metrics[metric].mean()
+                score = detection_metrics[metric].mean() if len(detection_metrics) > 0 else 0
             scores.append(score)
 
         style = style_map[name]
@@ -663,7 +741,7 @@ def plot_detection_scores(dataset_name, split, model_name, sample_types, metric=
     plt.xticks(np.linspace(0, 1.0, 11), [f"{int(x*100)}%" for x in np.linspace(0, 1.0, 11)])
     if dataset_name == 'Stanford-Tree-Bank':
         plt.title("Sentence-Level Detection Performance", fontweight='bold', fontsize=14)
-    elif 'Sarcasm' in dataset_name:
+    elif 'Sarcasm' in dataset_name or dataset_name == 'GoEmotions':
         plt.title("Paragraph-Level Detection Performance", fontweight='bold', fontsize=14)
     else:
         plt.title("Image-Level Detection Performance", fontweight='bold', fontsize=14)
@@ -678,10 +756,11 @@ def plot_detection_scores_per_concept(dataset_name, split, model_name, sample_ty
                                       concepts_to_plot=None, plot_type='both', n_cols=3):
     """
     Creates a separate subplot for each concept showing detection performance across percentiles.
+    Updated to match the style and functionality of plot_detection_scores.
 
     Args:
         dataset_name (str): Name of the dataset
-        split (str): 'train' or 'test' split
+        split (str): 'train', 'test', or 'cal' split
         model_name (str): Model name (e.g., 'CLIP', 'Llama')
         sample_types (list): List of sample types (e.g., ['patch', 'cls'])
         metric (str): Metric to plot (default: 'f1')
@@ -689,6 +768,7 @@ def plot_detection_scores_per_concept(dataset_name, split, model_name, sample_ty
         plot_type (str): 'supervised', 'unsupervised', or 'both'
         n_cols (int): Number of columns in the subplot grid
     """
+    save_path = f'../Figs/Paper_Figs/{model_name}_{dataset_name}_detectplot_per_concept.pdf'
     plt.rcParams.update({'font.size': 8})
     percentiles = [0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 0.9, 0.95]
 
@@ -707,12 +787,12 @@ def plot_detection_scores_per_concept(dataset_name, split, model_name, sample_ty
         gt_samples_per_concept = torch.load(f'GT_Samples/{dataset_name}/gt_samples_per_concept_{split}_inputsize_(560, 560).pt', weights_only=False)
 
     gt_samples_per_concept = filter_concept_dict(gt_samples_per_concept, dataset_name)
+    
     # Determine which concepts to plot
     if concepts_to_plot is None:
         concepts_to_plot = sorted(filter_concept_dict(gt_samples_per_concept, dataset_name).keys())
     else:
         concepts_to_plot = [c for c in concepts_to_plot if c in gt_samples_per_concept]
-
 
     if not concepts_to_plot:
         print("No valid concepts to plot.")
@@ -747,105 +827,184 @@ def plot_detection_scores_per_concept(dataset_name, split, model_name, sample_ty
 
     # Create figure with subplots
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-    if n_concepts == 1:
-        axes = [axes]
+    
+    # Handle different cases of axes returned by subplots
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]  # Single subplot, wrap in list
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.tolist()  # 1D array of subplots
     else:
-        axes = axes.flatten() if n_rows > 1 or n_cols > 1 else [axes]
+        axes = axes.flatten().tolist()  # 2D array of subplots
 
-    # Get prompt scores if available
-    try:
-        prompt_scores = get_per_concept_prompt_scores(dataset_name, metric)
-    except Exception:
-        prompt_scores = None
+    # Get prompt scores if available (only for rate-based metrics)
+    prompt_scores = {}
+    if metric not in ['fp', 'fn', 'tp', 'tn']:
+        try:
+            # Use per-concept prompt scores if available, otherwise compute from weighted average
+            prompt_scores = get_per_concept_prompt_scores(dataset_name, model_name, metric, split)
+        except Exception:
+            # Fallback: use single prompt score for all concepts  
+            try:
+                single_score = get_weighted_prompt_score(dataset_name, model_name, metric, split)
+                prompt_scores = {c: single_score for c in concepts_to_plot}
+            except Exception:
+                prompt_scores = {}
+
+    # Baseline style map
+    baseline_style_map = {
+        'random':     {'color': '#888888', 'label': 'Random'},
+        'always_yes': {'color': '#bbbbbb', 'label': 'Always Pos'},
+        'always_no':  {'color': '#dddddd', 'label': 'Always Neg'}
+    }
+    
+    # Pre-load all baseline data
+    baseline_data = {}
+    for baseline_type in ['random', 'always_yes', 'always_no']:
+        baseline_path = f'Quant_Results/{dataset_name}/{baseline_type}_{model_name}_cls_baseline.csv'
+        if not os.path.exists(baseline_path):
+            continue
+        try:
+            df = pd.read_csv(baseline_path)
+            df = df[df['concept'].isin(gt_samples_per_concept)]
+            baseline_data[baseline_type] = df
+        except Exception:
+            continue
 
     # Plot for each concept
     for idx, concept in enumerate(concepts_to_plot):
         ax = axes[idx]
 
-        # Plot prompt baselines if available
-        if prompt_scores and metric == 'f1' and concept in prompt_scores:
-            ax.axhline(prompt_scores[concept], color='#8B4513', linestyle='-.', linewidth=1.5,
+        # Plot prompt score if available
+        if concept in prompt_scores:
+            ax.axhline(prompt_scores[concept], color='#8B4513', linestyle='-.', linewidth=2,
                        label="Prompt" if idx == 0 else None)
 
-        # Plot baseline CSVs
-        baseline_style_map = {
-            'random': {'color': '#888888', 'label': 'Random'},
-            'always_yes': {'color': '#bbbbbb', 'label': 'Always Pos'},
-            'always_no': {'color': '#dddddd', 'label': 'Always Neg'}
-        }
+        # Plot baselines
+        for baseline_type, df in baseline_data.items():
+            concept_row = df[df['concept'] == concept]
+            if not concept_row.empty:
+                score = concept_row.iloc[0][metric]
+                style = baseline_style_map[baseline_type]
+                ax.axhline(score, color=style['color'], linestyle='-.', linewidth=1.5,
+                           label=style['label'] if idx == 0 else None)
 
-        for baseline_type in ['random', 'always_yes', 'always_no']:
-            baseline_path = f'Quant_Results/{dataset_name}/{baseline_type}_{model_name}_cls_baseline.csv'
-            
-            # Fallback to simpler naming for some datasets
-            if not os.path.exists(baseline_path):
-                baseline_path = f'Quant_Results/{dataset_name}/{baseline_type}.csv'
-                
-            if os.path.exists(baseline_path):
-                df = pd.read_csv(baseline_path)
-                concept_row = df[df['concept'] == concept]
-                if not concept_row.empty:
-                    score = concept_row.iloc[0][metric]
-                    style = baseline_style_map[baseline_type]
-                    ax.axhline(score, color=style['color'], linestyle='-.', linewidth=1,
-                               label=style['label'] if idx == 0 else None)
-
+        # Track seen labels to avoid duplicates in legend
+        seen_labels = set() if idx > 0 else set()
+        
         # Plot concept discovery methods
         for name, con_label in con_labels.items():
             scores = []
-            valid_percentiles = []
-
+            
             for percentile in percentiles:
-                try:
-                    detection_metrics = torch.load(
-                        f'Quant_Results/{dataset_name}/detectionmetrics_per_{percentile}_{con_label}.pt',
-                        weights_only=False
-                    )
-                    concept_metrics = detection_metrics[detection_metrics['concept'] == concept]
-                    if not concept_metrics.empty:
-                        scores.append(concept_metrics.iloc[0][metric])
-                        valid_percentiles.append(percentile)
-                except FileNotFoundError:
-                    continue
+                # For calibration data, append _cal to con_label
+                if split == 'cal':
+                    file_con_label = con_label + '_cal'
+                else:
+                    file_con_label = con_label
+                    
+                # Check if this is an unsupervised method (kmeans or sae)
+                if 'kmeans' in con_label or 'sae' in con_label:
+                    # Unsupervised: use allpairs pattern and CSV format
+                    file_path = f'Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{percentile}_{file_con_label}.csv'
+                    
+                    if not os.path.exists(file_path):
+                        scores.append(0)  # Default to 0 if file not found
+                        continue
+                        
+                    try:
+                        # Load CSV file for unsupervised
+                        detection_metrics = pd.read_csv(file_path)
+                        
+                        # For unsupervised, need to find the best matching cluster for this concept
+                        # Load the best cluster mapping for the appropriate split
+                        if split == 'cal':
+                            # For calibration, use the calibration-specific best clusters
+                            best_clusters_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}_cal.pt'
+                        else:
+                            # For test/train, use the regular best clusters
+                            best_clusters_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
+                        if os.path.exists(best_clusters_path):
+                            best_clusters = torch.load(best_clusters_path, weights_only=False)
+                            if concept in best_clusters:
+                                cluster_id = best_clusters[concept]['best_cluster']
+                                # Find the row for this (concept, cluster) pair
+                                concept_metrics = detection_metrics[detection_metrics['concept'] == f"('{concept}', '{cluster_id}')"]
+                                if not concept_metrics.empty:
+                                    scores.append(concept_metrics.iloc[0][metric])
+                                else:
+                                    scores.append(0)
+                            else:
+                                scores.append(0)
+                        else:
+                            scores.append(0)
+                    except Exception:
+                        scores.append(0)
+                else:
+                    # Supervised: use original pattern and PT format
+                    file_path = f'Quant_Results/{dataset_name}/detectionmetrics_per_{percentile}_{file_con_label}.pt'
+                    
+                    if not os.path.exists(file_path):
+                        scores.append(0)  # Default to 0 if file not found
+                        continue
+                        
+                    try:
+                        detection_metrics = torch.load(file_path, weights_only=False)
+                        concept_metrics = detection_metrics[detection_metrics['concept'] == concept]
+                        if not concept_metrics.empty:
+                            scores.append(concept_metrics.iloc[0][metric])
+                        else:
+                            scores.append(0)
+                    except Exception:
+                        scores.append(0)
 
-            if scores:
-                style = style_map.get(name, {})
-                color = style.get('color', 'gray')
-                kind = style.get('type', 'supervised')
-                label = style.get('label', name)
+            if any(s > 0 for s in scores):  # Only plot if we have some valid scores
+                style = style_map[name]
+                color = style['color']
+                kind = style['type']
+                label = style['label']
                 linestyle = ':' if plot_type == 'both' and kind == 'unsupervised' else '-'
-
+                
                 # Only show label in first subplot to avoid legend duplication
-                plot_label = label if idx == 0 else None
-                ax.plot(valid_percentiles, scores, color=color, linestyle=linestyle,
-                        marker='o', markersize=3, label=plot_label)
+                plot_label = label if idx == 0 and label not in seen_labels else None
+                if idx == 0:
+                    seen_labels.add(label)
+                    
+                ax.plot(percentiles, scores, color=color, linestyle=linestyle,
+                        marker='o', markersize=4, label=plot_label)
 
         # Formatting for each subplot
-        ax.set_xlabel("Concept Recall %", fontsize=10)
-        ax.set_ylabel(f"{metric.upper()} Score", fontsize=10)
-        ax.set_title(f"{concept}", fontsize=11, fontweight='bold')
+        ax.set_xlabel("Concept Recall Percentage", fontsize=12)
+        ax.set_ylabel(f"{metric.upper()} Score", fontsize=12)
+        ax.set_title(f"{concept}", fontsize=12, fontweight='bold')
         ax.set_ylim(0, 1.05)
         ax.set_xlim(0, 1)
-        ax.set_xticks(np.linspace(0, 1.0, 6))
-        ax.set_xticklabels([f"{int(x*100)}%" for x in np.linspace(0, 1.0, 6)])
-        ax.grid(True, linestyle='--', linewidth=0.3)
+        ax.set_xticks(np.linspace(0, 1.0, 11))
+        ax.set_xticklabels([f"{int(x*100)}%" for x in np.linspace(0, 1.0, 11)])
+        ax.grid(True, linestyle='--', linewidth=0.5)
 
     # Remove empty subplots
     for idx in range(n_concepts, len(axes)):
         fig.delaxes(axes[idx])
 
-    # Add overall title
-    fig.suptitle(f"Detection Performance by Concept - {model_name} on {dataset_name}",
-                 fontsize=14, fontweight='bold')
+    # Add overall title matching the style of plot_detection_scores
+    if dataset_name == 'Stanford-Tree-Bank':
+        title = "Per-Concept Sentence-Level Detection Performance"
+    elif 'Sarcasm' in dataset_name or dataset_name == 'GoEmotions':
+        title = "Per-Concept Paragraph-Level Detection Performance"
+    else:
+        title = "Per-Concept Image-Level Detection Performance"
+    
+    fig.suptitle(title, fontweight='bold', fontsize=16)
 
-    # Add legend to the first subplot or figure
+    # Add legend to the figure
     if n_concepts > 0:
         handles, labels = axes[0].get_legend_handles_labels()
         if handles:
-            fig.legend(handles, labels, loc='center left', bbox_to_anchor=(1, 0.5),
-                       title="Method", fontsize=8)
+            fig.legend(handles, labels, title="Concept Type", bbox_to_anchor=(1.05, 0.5),
+                       loc='center left', fontsize=10)
 
     plt.tight_layout()
+    plt.savefig(save_path, dpi=500, format='pdf', bbox_inches='tight')
     plt.show()
 
 
@@ -1003,39 +1162,96 @@ def compare_best_schemes(metric_type, concept_schemes, dataset_name, model_name,
     gt_samples_per_concept = filter_concept_dict(gt_samples_per_concept, dataset_name)
 
     for concept_scheme in concept_schemes:
-        # Use pre-calibrated optimal results
-        if superdetector_inversion:
-            path_prefix = 'superpatch_avg_inv_'
-        else:
-            path_prefix = ''
-            
+        # Construct con_label first
         if concept_scheme == 'avg':
-            file_name = f"{path_prefix}{model_name}_avg_patch_embeddings_percentthrumodel_100_optimal_test.csv"
+            con_label = f"{model_name}_avg_patch_embeddings_percentthrumodel_100"
         elif concept_scheme == 'linsep':
-            file_name = f"{path_prefix}{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100_optimal_test.csv"
+            con_label = f"{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100"
         elif concept_scheme == 'unsupervised kmeans':
-            file_name = f"{path_prefix}{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100_optimal_test.csv"
+            con_label = f"{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100"
         elif concept_scheme == 'unsupervised kmeans linsep':
-            file_name = f"{path_prefix}{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100_optimal_test.csv"
+            con_label = f"{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100"
         else:
             raise ValueError(f"Unrecognized concept scheme: {concept_scheme}")
+
+        # Use the actual file naming from all_inversion_stats.py
+        if superdetector_inversion:
+            # Two-stage superdetector files
+            pt_file_name = f"optimal_test_results_twostage_superpatch_{con_label}_f1.pt"
+            csv_file_name = f"twostage_superpatch_avg_{con_label}_optimal_test.csv"
+            
+            # Check if CSV exists, otherwise use PT file
+            if os.path.exists(os.path.join(base_dir, csv_file_name)):
+                file_name = csv_file_name
+            else:
+                # Load PT file and convert to the format expected
+                pt_path = os.path.join(base_dir, pt_file_name)
+                if os.path.exists(pt_path):
+                    results = torch.load(pt_path, weights_only=False)
+                    # Convert to CSV format
+                    rows = []
+                    for concept, metrics in results.items():
+                        row = {
+                            'concept': concept,
+                            'tp': metrics['tp'],
+                            'fp': metrics['fp'],
+                            'tn': metrics['tn'],
+                            'fn': metrics['fn'],
+                            'precision': metrics['precision'],
+                            'recall': metrics['recall'],
+                            'f1': metrics['f1'],
+                            'accuracy': metrics['accuracy']
+                        }
+                        if 'invert_percentile' in metrics:
+                            row['invert_percentile'] = metrics['invert_percentile']
+                        rows.append(row)
+                    df_temp = pd.DataFrame(rows)
+                    csv_path = os.path.join(base_dir, csv_file_name)
+                    df_temp.to_csv(csv_path, index=False)
+                    file_name = csv_file_name
+                else:
+                    print(f"Warning: Neither CSV nor PT file found for twostage {con_label}")
+                    continue
+        else:
+            # Regular method doesn't create CSV by default, so try PT file first
+            pt_file_name = f"optimal_test_results_{con_label}_f1.pt"
+            csv_file_name = f"{con_label}_optimal_test.csv"
+            
+            # Check if CSV exists, otherwise use PT file
+            if os.path.exists(os.path.join(dir, csv_file_name)):
+                file_name = csv_file_name
+            else:
+                # Load PT file and convert to the format expected
+                pt_path = os.path.join(dir, pt_file_name)
+                if os.path.exists(pt_path):
+                    results = torch.load(pt_path, weights_only=False)
+                    # Convert to CSV format
+                    rows = []
+                    for concept, metrics in results.items():
+                        rows.append({
+                            'concept': concept,
+                            'tp': metrics['tp'],
+                            'fp': metrics['fp'],
+                            'tn': metrics['tn'],
+                            'fn': metrics['fn'],
+                            'precision': metrics['precision'],
+                            'recall': metrics['recall'],
+                            'f1': metrics['f1'],
+                            'accuracy': metrics['accuracy']
+                        })
+                    df_temp = pd.DataFrame(rows)
+                    csv_path = os.path.join(dir, csv_file_name)
+                    df_temp.to_csv(csv_path, index=False)
+                    file_name = csv_file_name
+                else:
+                    print(f"Warning: Neither CSV nor PT file found for {con_label}")
+                    continue
 
         metric_path = f'{dir}/{file_name}'
         
         try:
             df = pd.read_csv(metric_path)
             df = df[df['concept'].isin(gt_samples_per_concept)]
-            
-            # Load optimal percentiles for display
-            optimal_path = f"Detect_Invert_Thresholds/{dataset_name}/optimal_f1_{model_name}"
-            if concept_scheme == 'avg':
-                optimal_path += "_avg_patch_embeddings_percentthrumodel_100.pt"
-            elif concept_scheme == 'linsep':
-                optimal_path += "_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100.pt"
-            elif concept_scheme == 'unsupervised kmeans':
-                optimal_path += "_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100.pt"
-            elif concept_scheme == 'unsupervised kmeans linsep':
-                optimal_path += "_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100.pt"
             
             # Don't show percentiles since they vary by concept
             label = f"{concept_scheme}"
@@ -1068,7 +1284,7 @@ def compare_best_schemes(metric_type, concept_schemes, dataset_name, model_name,
 
     title = f"Best {metric_type.capitalize()} for {model_name} Patch Schemes on {dataset_name}"
     if superdetector_inversion:
-        title += "\n(Local Superdetector Inversion)"
+        title += "\n(Superdetector Inversion)"
     if include_baselines:
         title += "\n(Including Inversion Baselines)"
 
@@ -1100,29 +1316,85 @@ def compare_best_schemes_per_concept(metric_type, concept_schemes, dataset_name,
     concept_to_best_metrics = {}
 
     for concept_scheme in concept_schemes:
-        # Use pre-calibrated optimal results
-        if superdetector_inversion:
-            path_prefix = 'superpatch_avg_inv_'
-        else:
-            path_prefix = ''
-            
+        # Construct con_label first
         if concept_scheme == 'avg':
-            file_name = f"{path_prefix}{model_name}_avg_patch_embeddings_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_avg_patch_embeddings_percentthrumodel_100.pt"
+            con_label = f"{model_name}_avg_patch_embeddings_percentthrumodel_100"
         elif concept_scheme == 'linsep':
-            file_name = f"{path_prefix}{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100.pt"
+            con_label = f"{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100"
         elif concept_scheme == 'unsupervised kmeans':
-            file_name = f"{path_prefix}{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100.pt"
+            con_label = f"{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100"
         elif concept_scheme == 'unsupervised kmeans linsep':
-            file_name = f"{path_prefix}{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100.pt"
+            con_label = f"{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100"
         else:
             raise ValueError(f"Unrecognized concept scheme: {concept_scheme}")
 
+        # Use the EXACT file naming from all_inversion_stats.py - NO FALLBACKS
+        if superdetector_inversion:
+            # Two-stage superdetector: all_inversion_stats.py saves BOTH PT and CSV
+            # We only use the CSV file
+            file_name = f"twostage_superpatch_avg_{con_label}_optimal_test.csv"
+        else:
+            # Regular method: all_inversion_stats.py saves ONLY PT file
+            pt_file_name = f"optimal_test_results_{con_label}_f1.pt"
+            pt_path = os.path.join(base_dir, pt_file_name)
+            
+            if not os.path.exists(pt_path):
+                print(f"Warning: Regular method results not found for {con_label}")
+                print(f"  Expected PT file: {pt_file_name}")
+                continue
+            
+            # Load PT file and convert to DataFrame for plotting
+            results = torch.load(pt_path, weights_only=False)
+            rows = []
+            for concept, metrics in results.items():
+                rows.append({
+                    'concept': concept,
+                    'tp': metrics['tp'],
+                    'fp': metrics['fp'],
+                    'tn': metrics['tn'],
+                    'fn': metrics['fn'],
+                    'precision': metrics['precision'],
+                    'recall': metrics['recall'],
+                    'f1': metrics['f1'],
+                    'accuracy': metrics['accuracy']
+                })
+            df = pd.DataFrame(rows)
+            
+            # Skip the rest of the CSV loading logic - we have df directly
+            if 'kmeans' in concept_scheme:
+                # Check if concepts in df are already ground truth names or cluster IDs
+                first_concept = str(df['concept'].iloc[0]) if len(df) > 0 else None
+                if first_concept and first_concept.isdigit():
+                    # Concepts are cluster IDs, need to map to ground truth names
+                    con_label_for_alignment = con_label  # Save original con_label
+                    alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label_for_alignment}.pt'
+                    alignment_results = torch.load(alignment_path, weights_only=False)
+                    cluster_to_concept = {str(info['best_cluster']): concept for concept, info in alignment_results.items()}
+                    df = df.copy()
+                    df['concept'] = df['concept'].astype(str).map(cluster_to_concept)
+                # else: concepts are already ground truth names, no mapping needed
+
+            df = df[df['concept'].isin(gt_samples_per_concept_test)]
+
+            if weighted_avg:
+                total_samples = sum(len(gt_samples_per_concept_test[c]) for c in df['concept'])
+                weighted_sum = sum(row[metric_type] * len(gt_samples_per_concept_test[row['concept']]) for _, row in df.iterrows())
+                avg_metric = weighted_sum / total_samples if total_samples > 0 else 0
+            else:
+                avg_metric = df[metric_type].mean()
+
+            scheme_name = f'{concept_scheme} superdetector cossim' if superdetector_inversion else f'{concept_scheme} concept cossim'
+            summary_rows.append({
+                'Scheme': scheme_name,
+                f'Best Avg {metric_type.upper()}': round(avg_metric, 4),
+                'Detect %': 'calibrated',
+                'Invert %': 'calibrated',
+                'File': pt_file_name if not superdetector_inversion else file_name
+            })
+            continue  # Skip the CSV loading part below
+
         metric_path = f'{base_dir}/{file_name}'
-        optimal_path = f'Detect_Invert_Thresholds/{dataset_name}/{optimal_file}'
+        optimal_path = f'Detect_Invert_Thresholds/{dataset_name}/optimal_f1_{con_label}.pt'
         
         try:
             df = pd.read_csv(metric_path)
@@ -1248,46 +1520,108 @@ def summarize_best_inversion_metrics(metric_type, concept_schemes, dataset_name,
     gt_samples_per_concept_test = filter_concept_dict(gt_samples_per_concept_test, dataset_name)
 
     for concept_scheme in concept_schemes:
-        # Use pre-calibrated optimal results
-        if superdetector_inversion:
-            path_prefix = 'superpatch_avg_inv_'
-        else:
-            path_prefix = ''
-            
+        # Construct con_label first
         if concept_scheme == 'avg':
-            file_name = f"{path_prefix}{model_name}_avg_patch_embeddings_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_avg_patch_embeddings_percentthrumodel_100.pt"
             con_label = f"{model_name}_avg_patch_embeddings_percentthrumodel_100"
         elif concept_scheme == 'linsep':
-            file_name = f"{path_prefix}{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100.pt"
             con_label = f"{model_name}_linsep_patch_embeddings_BD_True_BN_False_percentthrumodel_100"
         elif concept_scheme == 'unsupervised kmeans':
-            file_name = f"{path_prefix}{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100.pt"
             con_label = f"{model_name}_kmeans_1000_patch_embeddings_kmeans_percentthrumodel_100"
         elif concept_scheme == 'unsupervised kmeans linsep':
-            file_name = f"{path_prefix}{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100_optimal_test.csv"
-            optimal_file = f"optimal_f1_{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100.pt"
             con_label = f"{model_name}_kmeans_1000_linsep_patch_embeddings_kmeans_percentthrumodel_100"
         else:
             raise ValueError(f"Unrecognized concept scheme: {concept_scheme}")
 
-        metric_path = os.path.join(base_dir, file_name)
-        optimal_path = f'Detect_Invert_Thresholds/{dataset_name}/{optimal_file}'
+        # Load best percentiles for display
+        detect_percentiles_data = None
+        invert_percentiles_data = None
+        
+        # For regular method
+        if not superdetector_inversion:
+            try:
+                detect_file = f'Best_Detection_Percentiles_Cal/{dataset_name}/best_percentiles_{con_label}.pt'
+                detect_percentiles_data = torch.load(detect_file, weights_only=False)
+                
+                invert_file = f'Best_Inversion_Percentiles_Cal/{dataset_name}/best_inversion_percentiles_{con_label}.pt'
+                invert_percentiles_data = torch.load(invert_file, weights_only=False)
+            except:
+                pass
+        else:
+            # For two-stage superdetector
+            try:
+                invert_file = f'Best_Inversion_Percentiles_Cal/{dataset_name}/best_inversion_percentiles_twostage_superpatch_{con_label}.pt'
+                invert_percentiles_data = torch.load(invert_file, weights_only=False)
+                # Two-stage uses best detection percentiles per concept
+                detect_file = f'Best_Detection_Percentiles_Cal/{dataset_name}/best_percentiles_{con_label}.pt'
+                detect_percentiles_data = torch.load(detect_file, weights_only=False)
+            except:
+                pass
 
-        if not os.path.exists(metric_path):
-            print(f"Warning: Optimal file not found {metric_path}")
-            continue
-
-        df = pd.read_csv(metric_path)
+        # Use the EXACT file naming from all_inversion_stats.py - NO FALLBACKS
+        if superdetector_inversion:
+            # Two-stage superdetector: all_inversion_stats.py saves PT file
+            pt_file_name = f"optimal_test_results_twostage_superpatch_{con_label}_f1.pt"
+            pt_path = os.path.join(base_dir, pt_file_name)
+            
+            if not os.path.exists(pt_path):
+                print(f"Warning: Two-stage superdetector results not found for {con_label}")
+                print(f"  Expected PT file: {pt_file_name}")
+                continue
+                
+            # Load PT file and convert to DataFrame for processing
+            results = torch.load(pt_path, weights_only=False)
+            rows = []
+            for concept, metrics in results.items():
+                row = {
+                    'concept': concept,
+                    'tp': metrics['tp'],
+                    'fp': metrics['fp'],
+                    'tn': metrics['tn'],
+                    'fn': metrics['fn'],
+                    'precision': metrics['precision'],
+                    'recall': metrics['recall'],
+                    'f1': metrics['f1']
+                }
+                rows.append(row)
+            df = pd.DataFrame(rows)
+        else:
+            # Regular method: all_inversion_stats.py saves ONLY PT file
+            pt_file_name = f"optimal_test_results_{con_label}_f1.pt"
+            pt_path = os.path.join(base_dir, pt_file_name)
+            
+            if not os.path.exists(pt_path):
+                print(f"Warning: Regular method results not found for {con_label}")
+                print(f"  Expected PT file: {pt_file_name}")
+                continue
+            
+            # Load PT file and convert to DataFrame for processing
+            results = torch.load(pt_path, weights_only=False)
+            rows = []
+            for concept, metrics in results.items():
+                row = {
+                    'concept': concept,
+                    'tp': metrics['tp'],
+                    'fp': metrics['fp'],
+                    'tn': metrics['tn'],
+                    'fn': metrics['fn'],
+                    'precision': metrics['precision'],
+                    'recall': metrics['recall'],
+                    'f1': metrics['f1']
+                }
+                rows.append(row)
+            df = pd.DataFrame(rows)
 
         if 'kmeans' in concept_scheme:
-            alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
-            alignment_results = torch.load(alignment_path, weights_only=False)
-            cluster_to_concept = {str(info['best_cluster']): concept for concept, info in alignment_results.items()}
-            df = df.copy()
-            df['concept'] = df['concept'].astype(str).map(cluster_to_concept)
+            # Check if concepts in df are already ground truth names or cluster IDs
+            first_concept = str(df['concept'].iloc[0]) if len(df) > 0 else None
+            if first_concept and first_concept.isdigit():
+                # Concepts are cluster IDs, need to map to ground truth names
+                alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
+                alignment_results = torch.load(alignment_path, weights_only=False)
+                cluster_to_concept = {str(info['best_cluster']): concept for concept, info in alignment_results.items()}
+                df = df.copy()
+                df['concept'] = df['concept'].astype(str).map(cluster_to_concept)
+            # else: concepts are already ground truth names, no mapping needed
 
         df = df[df['concept'].isin(gt_samples_per_concept_test)]
 
@@ -1297,14 +1631,41 @@ def summarize_best_inversion_metrics(metric_type, concept_schemes, dataset_name,
             avg_metric = weighted_sum / total_samples if total_samples > 0 else 0
         else:
             avg_metric = df[metric_type].mean()
+            
+        # Get most common percentiles from the loaded data
+        detect_percentile_str = 'calibrated'
+        invert_percentile_str = 'calibrated'
+        
+        if detect_percentiles_data and invert_percentiles_data:
+            # Get all percentiles used for concepts in df
+            detect_percs = []
+            invert_percs = []
+            
+            for concept in df['concept']:
+                if concept in detect_percentiles_data:
+                    detect_percs.append(detect_percentiles_data[concept].get('best_percentile', None))
+                if concept in invert_percentiles_data:
+                    invert_percs.append(invert_percentiles_data[concept].get('best_percentile', None))
+            
+            # Get mode (most common) percentiles
+            if detect_percs:
+                from collections import Counter
+                detect_counter = Counter(detect_percs)
+                mode_detect = detect_counter.most_common(1)[0][0]
+                detect_percentile_str = str(mode_detect)
+                    
+            if invert_percs:
+                invert_counter = Counter(invert_percs)
+                mode_invert = invert_counter.most_common(1)[0][0]
+                invert_percentile_str = str(mode_invert)
 
         scheme_name = f'{concept_scheme} superdetector cossim' if superdetector_inversion else f'{concept_scheme} concept cossim'
         summary_rows.append({
             'Scheme': scheme_name,
             f'Best Avg {metric_type.upper()}': round(avg_metric, 4),
-            'Detect %': 'calibrated',
-            'Invert %': 'calibrated',
-            'File': file_name
+            'Detect %': detect_percentile_str,
+            'Invert %': invert_percentile_str,
+            'File': pt_file_name
         })
 
     if include_baselines:
@@ -1332,6 +1693,111 @@ def summarize_best_inversion_metrics(metric_type, concept_schemes, dataset_name,
                 print(f"Warning: Baseline file not found {baseline_path}")
 
     return pd.DataFrame(summary_rows)
+
+
+def summarize_all_inversion_methods(metric_type, concept_schemes, dataset_name, 
+                                  weighted_avg=True, include_baselines=True):
+    """
+    Comprehensive summary showing all models and both regular/superdetector methods for a dataset.
+    
+    Args:
+        metric_type: 'f1', 'precision', 'recall', etc.
+        concept_schemes: List like ['avg', 'linsep', 'unsupervised kmeans']
+        dataset_name: Dataset name
+        weighted_avg: Whether to weight by number of test samples
+        include_baselines: Whether to include random baselines
+    
+    Returns:
+        pd.DataFrame with comprehensive comparison
+    """
+    # Determine models based on dataset type
+    if dataset_name in ['Stanford-Tree-Bank', 'GoEmotions'] or 'Sarcasm' in dataset_name:
+        # Text datasets
+        models = ['Llama', 'Qwen']
+    else:
+        # Image datasets  
+        models = ['CLIP', 'Llama']
+    
+    all_summary_rows = []
+    
+    for model_name in models:
+        for superdetector in [False, True]:
+            method_name = "Superdetector" if superdetector else "Regular"
+            
+            try:
+                # Get results for this model/method combination
+                results_df = summarize_best_inversion_metrics(
+                    metric_type=metric_type,
+                    concept_schemes=concept_schemes, 
+                    dataset_name=dataset_name,
+                    model_name=model_name,
+                    superdetector_inversion=superdetector,
+                    weighted_avg=weighted_avg,
+                    include_baselines=False  # Add baselines only once at the end
+                )
+                
+                # Add model and method columns
+                for _, row in results_df.iterrows():
+                    new_row = row.to_dict()
+                    new_row['Model'] = model_name
+                    new_row['Method'] = method_name
+                    # Reorder scheme name to include model/method info
+                    new_row['Scheme'] = f"{model_name} {method_name} {row['Scheme']}"
+                    all_summary_rows.append(new_row)
+                    
+            except Exception as e:
+                print(f"Warning: Could not process {model_name} {method_name}: {e}")
+                continue
+    
+    # Add baselines once if requested
+    if include_baselines and models:
+        # Use first available model for baselines
+        try:
+            baseline_df = summarize_best_inversion_metrics(
+                metric_type=metric_type,
+                concept_schemes=[],  # Empty to skip concept schemes 
+                dataset_name=dataset_name,
+                model_name=models[0],
+                superdetector_inversion=False,
+                weighted_avg=weighted_avg,
+                include_baselines=True
+            )
+            
+            for _, row in baseline_df.iterrows():
+                if 'Baseline' in row['Scheme']:
+                    new_row = row.to_dict()
+                    new_row['Model'] = 'N/A'
+                    new_row['Method'] = 'Baseline'
+                    all_summary_rows.append(new_row)
+        except:
+            pass
+    
+    if not all_summary_rows:
+        print(f"No results found for dataset {dataset_name}")
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(all_summary_rows)
+    
+    # Sort by Model first, then Method, then by metric value (descending)
+    metric_col = f'Best Avg {metric_type.upper()}'
+    if metric_col in df.columns:
+        df = df.sort_values(['Model', 'Method', metric_col], ascending=[True, True, False])
+    
+    # Display the DataFrame directly
+    print(f"\n=== {dataset_name} - All Inversion Methods Comparison ({metric_type.upper()}) ===")
+    display(df)
+    
+    # Save to CSV file
+    import os
+    save_dir = f'../Inversion_Tables/{dataset_name}'
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Create filename with metric type
+    save_path = f'{save_dir}/all_inversion_methods_{metric_type}.csv'
+    df.to_csv(save_path, index=False)
+    print(f"\nTable saved to: {save_path}")
+    
+    return None
 
 
 # Removed summarize_best_equal_percentile_inversion_metrics as it's no longer needed with calibration approach

@@ -7,6 +7,7 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import matplotlib.patches as mpatches
 import math
+import ast
 
 import torch.nn.functional as F
 import torch
@@ -17,7 +18,7 @@ importlib.reload(general_utils)
 import patch_alignment_utils
 importlib.reload(patch_alignment_utils)
 
-from general_utils import retrieve_image, get_split_df, pad_or_resize_img
+from general_utils import retrieve_image, get_split_df, pad_or_resize_img, load_images, create_image_loader_function
 from patch_alignment_utils import compute_patches_per_image, calculate_patch_location, compute_patch_similarities_to_vector, get_image_idx_from_global_patch_idx, get_patch_split_df, calculate_patch_indices
 
 ######### only when there's gt labels #########
@@ -73,71 +74,96 @@ def get_user_concept(category, concept_columns):
         except ValueError:
             print("Invalid input. Please enter a number.")
 
-def plot_aligned_images(comp_df, con_label, concept_key=None, k=5, dataset_name='CLEVR', metric_type='Cosine Similarity', save_image=False):
+def plot_aligned_images(acts_loader, con_label, concept_key=None, k=5, dataset_name='CLEVR', metric_type='Cosine Similarity', save_image=False, test_only=True):
     """
     Plot images that align well with a selected concept.
 
     Args:
-        cossim_file (str): The name of the file where the cosine similarities values are between each data sample and concept.
+        acts_loader: ChunkedActivationLoader instance or DataFrame with activations.
         con_label (str): label to put in path of saved image.
+        concept_key (str): The concept to visualize. If None, will prompt user.
         k (int): Number of top images to display. Defaults to 5.
         dataset_name (str): The name of the dataset. Defaults to 'CLEVR'.
-        save_image (Boolean): Whether to save png of plots.
+        metric_type (str): Type of metric being visualized.
+        save_image (bool): Whether to save png of plots.
+        test_only (bool): Whether to only consider test samples.
 
     Returns:
         None
     """
-    # Get the user's choice of concept category and specific concept
+    # Load activations - handle both loader and DataFrame inputs
+    if hasattr(acts_loader, 'load_full_dataframe'):
+        comp_df = acts_loader.load_full_dataframe()
+    else:
+        comp_df = acts_loader  # Assume it's already a DataFrame
+    
+    # Filter for test samples if requested
+    if test_only:
+        metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+        test_indices = metadata[metadata['split'] == 'test'].index
+        comp_df = comp_df.loc[comp_df.index.intersection(test_indices)]
+    
+    # Get the user's choice of concept if not provided
     concept_columns = list(comp_df.columns)
     if not concept_key:
-        category, concept_columns = get_user_category(concept_columns)  # Get the category first
-        concept_key = get_user_concept(category, concept_columns)  # Then get the specific concept
+        category, concept_columns = get_user_category(concept_columns)
+        concept_key = get_user_concept(category, concept_columns)
     
-    #display image if it was previously computed
-    # save_path = f'../Figs/{dataset_name}/most_aligned_w_concepts/concept_{concept_key}_{k}__{con_label}.jpg'
-    # if os.path.exists(save_path):
-    #     plt.figure(figsize=(15, 10))
-    #     plt.imshow(Image.open(save_path))
-    #     plt.axis('off')
-    #     plt.show()
-    #     return
+    # Check if concept exists
+    if concept_key not in comp_df.columns:
+        print(f"Concept '{concept_key}' not found. Available concepts:")
+        print(sorted(comp_df.columns)[:10], "...")
+        return
     
     # Sort by cosine similarity and get the top k highest values for the specified concept
     top_k_indices = comp_df.nlargest(k, concept_key).index.tolist()
     
     # Calculate the number of rows and columns for the plot
-    n_cols = min(k, 5)  # Up to 5 images per row
-    n_rows = (k + 4) // 5  # Calculate number of rows needed
+    n_cols = k  # All images in one row
+    n_rows = 1  # Single row
 
     # Plot the top k images based on cosine similarity
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5 * n_rows))
-    axes = axes.flatten()  # Flatten the axes array to easily index it
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * k, 5))
+    if k == 1:
+        axes = [axes]  # Ensure axes is always a list
+    elif n_rows == 1:
+        axes = axes.flatten()  # Flatten for consistency
 
     plt.suptitle(f"Top {k} Images with Highest {metric_type} to: Concept {concept_key}", fontsize=16)
+    
+    # Load only the images we need
+    loaded_images = {}
+    for idx in top_k_indices:
+        loaded_images[idx] = retrieve_image(idx, dataset_name, test_only=False)
+    
     for rank, idx in enumerate(top_k_indices):
         if rank >= len(axes):  # In case there are fewer images than axes
             break
         
-        # Get the image path from metadata
-        img = retrieve_image(idx, dataset_name, test_only=True)
+        # Get the image from our loaded images
+        img = loaded_images[idx]
 
         value = comp_df.loc[idx, concept_key]
         axes[rank].imshow(img)
         axes[rank].set_title(f"Rank {rank+1}: Image {idx}\n{metric_type} = {value:.4f}")
         axes[rank].axis('off')
+    
+    # Hide unused axes
+    for rank in range(len(top_k_indices), len(axes)):
+        axes[rank].axis('off')
 
-    plt.subplots_adjust(top=0.9, bottom=0.05, hspace=0.3) 
-    plt.tight_layout(pad=0.9, h_pad=0.2)
+    plt.tight_layout()
     
     if save_image:
         save_path = f'../Figs/{dataset_name}/most_aligned_w_concepts/concept_{concept_key}_{k}__{con_label}.jpg'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, bbox_inches='tight', dpi=500)
         
     plt.show()
     
     
 ###### Patch Similarities #####
-def neighboring_patch_comparisons(image_index, patch_index_in_image, embeddings, images, 
+def neighboring_patch_comparisons(image_index, patch_index_in_image, loader, 
                                   dataset_name, model_input_size, patch_size=14, 
                                   save_path=None):
     """
@@ -145,20 +171,19 @@ def neighboring_patch_comparisons(image_index, patch_index_in_image, embeddings,
     The heatmap is overlayed on the original image, and the original image is shown separately to the left.
 
     Args:
-        image_index (int): The index of the image in the list of images.
+        image_index (int): The index of the image in the dataset.
         patch_index_in_image (int): The index of the patch within the image.
-        embeddings (torch.tensor): Embeddings for the dataset.
-        images (list of PIL.Image): A list of images.
+        loader: ChunkedEmbeddingLoader instance for loading embeddings.
         dataset_name (str): The name of the dataset.
-        patch_size (int): The size of each patch.
         model_input_size (tuple): The input size to which the image should be resized (width, height).
+        patch_size (int): The size of each patch.
         save_path (str) : Where to save path.
 
     Returns:
         None: Displays the heatmap overlayed on the image.
     """
-    # Process image
-    image = images[image_index]
+    # Retrieve the image
+    image = retrieve_image(image_index, dataset_name, test_only=False)
     resized_image = pad_or_resize_img(image, model_input_size)
 
     # Calculate patch indices
@@ -166,27 +191,42 @@ def neighboring_patch_comparisons(image_index, patch_index_in_image, embeddings,
         image_index, patch_index_in_image, patch_size, model_input_size
     )
 
-    # Extract embeddings for the selected patch and the entire image
-    selected_patch_embedding = embeddings[global_patch_idx]
-    image_start_idx = image_index * (patches_per_row * patches_per_col)
-    image_end_idx = image_start_idx + (patches_per_row * patches_per_col)
-    image_patch_embeddings = embeddings[image_start_idx:image_end_idx]
+    # Calculate indices for all patches in the image
+    patches_per_image = patches_per_row * patches_per_col
+    image_start_idx = image_index * patches_per_image
+    image_patch_indices = list(range(image_start_idx, image_start_idx + patches_per_image))
+    
+    # Load all necessary embeddings in one go
+    all_indices_needed = image_patch_indices + [global_patch_idx]
+    all_indices_needed = list(set(all_indices_needed))  # Remove duplicates
+    embeddings = loader.load_specific_embeddings(all_indices_needed)
+    
+    # Create a mapping from global indices to loaded position
+    idx_to_position = {idx: pos for pos, idx in enumerate(all_indices_needed)}
+    
+    # Get the selected patch embedding
+    selected_patch_position = idx_to_position[global_patch_idx]
+    selected_patch_embedding = embeddings[selected_patch_position]
+    
+    # Get embeddings for all patches in the image
+    image_patch_embeddings = torch.stack([
+        embeddings[idx_to_position[idx]] for idx in image_patch_indices
+    ])
 
     # Compute cosine similarities
     cos_sims = F.cosine_similarity(
-        selected_patch_embedding.unsqueeze(0).cpu(),
-        image_patch_embeddings.cpu()
-    ).flatten()
+        selected_patch_embedding.unsqueeze(0),
+        image_patch_embeddings
+    ).cpu()
 
     # Reshape similarities to match the patch grid
     cos_sim_grid = cos_sims.reshape(patches_per_col, patches_per_row)
 
     # Plot the heatmap
     plot_patches_sim_to_vector(
-        cos_sim_grid, resized_image, patch_size, image_index, patch_index_in_image, save_path=None,
+        cos_sim_grid, resized_image, patch_size, image_index, patch_index_in_image, save_path=save_path,
         plot_title = f'Patch Similarity (Image {image_index}, Patch {patch_index_in_image})',
         bar_title='Cosine Similarity with Chosen Patch'
-        
     )
     
 
@@ -211,7 +251,7 @@ def make_image_with_highlighted_patch(image, left, top, right, bottom, model_inp
     if grayscale:
         image_with_patch = image_with_patch.convert('L').convert('RGB') 
     draw = ImageDraw.Draw(image_with_patch)
-    draw.rectangle([left, top, right, bottom], outline="red", width=3)
+    draw.rectangle([left, top, right, bottom], outline="blue", width=5)
 
     if plot_image_title is not None:
         plt.imshow(image_with_patch)
@@ -327,63 +367,87 @@ def plot_top_patches_for_concept(concept_label, cos_sims, images, dataset_name, 
     plot_patches_w_corr_images(top_patch_indices, concept_cos_sims, images, overall_title, save_path=save_path, patch_size=patch_size, model_input_size=model_input_size, metric_type=metric_type)
     
 
-def plot_most_similar_patches_w_heatmaps_and_corr_images(concept_label, images, cos_sims, embeds, con_label, dataset_name, model_input_size, vmin=None, vmax=None, save_path="", patch_size=14, top_n=5, metric_type='Cosine Similarity', test_only=True):
+def plot_most_similar_patches_w_heatmaps_and_corr_images(concept_label, acts_loader, con_label, dataset_name, model_input_size, vmin=None, vmax=None, save_path="", patch_size=14, top_n=5, metric_type='Cosine Similarity', test_only=True):
     """
     Plots the most similar patches with a chosen concept, as well as the heatmaps for that concept and the corresponding image.
+    
+    Args:
+        concept_label (str): The concept to visualize.
+        acts_loader: ChunkedActivationLoader instance or DataFrame with activations.
+        con_label (str): Label for saving.
+        dataset_name (str): Name of the dataset.
+        model_input_size (tuple): Model input size.
+        vmin (float): Minimum value for heatmap color scale.
+        vmax (float): Maximum value for heatmap color scale.
+        save_path (str): Where to save the figure.
+        patch_size (int): Size of patches.
+        top_n (int): Number of top patches to show.
+        metric_type (str): Type of metric.
+        test_only (bool): Whether to only use test samples.
     """
-    #just display figure if it already was computed
-    # if os.path.exists(save_path):
-    #     plt.figure(figsize=(15, 10))
-    #     plt.imshow(Image.open(save_path))
-    #     plt.axis('off')
-    #     plt.show()
-    #     return
+    
+    # Load activations - handle both loader and DataFrame inputs
+    if hasattr(acts_loader, 'load_full_dataframe'):
+        cos_sims = acts_loader.load_full_dataframe()
+    else:
+        cos_sims = acts_loader  # Assume it's already a DataFrame
+    
+    # Filter for test samples if needed
+    if test_only:
+        split_df = get_patch_split_df(dataset_name, model_input_size, patch_size)
+        test_indices = split_df[split_df == 'test'].index
+        cos_sims_filtered = cos_sims.loc[cos_sims.index.intersection(test_indices)]
+    else:
+        cos_sims_filtered = cos_sims
+    
+    # Check if concept exists
+    if concept_label not in cos_sims.columns:
+        print(f"Concept '{concept_label}' not found. Available concepts:")
+        print(sorted(cos_sims.columns)[:10], "...")
+        return
+    
+    # Get top patches
+    most_similar_patches = cos_sims_filtered[concept_label].sort_values(ascending=False).head(top_n).index
     
     fig, axes = plt.subplots(2, top_n, figsize=(top_n * 3, 6))
+    if top_n == 1:
+        axes = axes.reshape(-1, 1)
     
-    if test_only:
-        metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
-        test_image_indices = metadata[metadata['split'] == 'test'].index  # Image-level indices
-
-        
-        # Convert patch indices to corresponding image indices
-        patches_per_image = compute_patches_per_image(patch_size=patch_size, model_input_size=model_input_size)
-        patch_image_indices = cos_sims.index // patches_per_image
-
-        # Keep only patches from test images
-        valid_patches = cos_sims.index[patch_image_indices.isin(test_image_indices)]
-        test_cos_sims = cos_sims.loc[valid_patches]
-
-    most_similar_patches = test_cos_sims[concept_label].sort_values(ascending=False).head(top_n).index
     heatmaps = {}
     images_w_patches = []
+    
+    # Calculate patches per image
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Determine which images we need to load
+    image_indices_needed = set()
     for patch_idx in most_similar_patches:
-
+        image_idx = get_image_idx_from_global_patch_idx(patch_idx, model_input_size, patch_size)
+        image_indices_needed.add(image_idx)
+    
+    # Load only the needed images
+    loaded_images = {}
+    for image_idx in image_indices_needed:
+        loaded_images[image_idx] = retrieve_image(image_idx, dataset_name, test_only=False)
+    
+    for patch_idx in most_similar_patches:
         # Determine the image index
-        image_idx = get_image_idx_from_global_patch_idx(patch_idx, patch_size=patch_size, model_input_size=model_input_size)
-
-        image = images[image_idx]
+        image_idx = get_image_idx_from_global_patch_idx(patch_idx, model_input_size, patch_size)
+        image = loaded_images[image_idx]
         
-        #Compute the heatmap for that image-concept combo
-        heatmap_path =f'Heatmaps/{dataset_name}/patchsim_concept_{concept_label}_img_{image_idx}_heatmaptype_avgsim_model__{con_label}'
-        try:
-            heatmap = compute_patch_similarities_to_vector(image_index=image_idx, concept_label=str(concept_label), 
-                                          images=images, embeddings=embeds,  cossims=cos_sims,
-                                          dataset_name='CLEVR', patch_size=patch_size, model_input_size=model_input_size,
-                                          save_path=None,
-                                          heatmap_path=heatmap_path, show_plot=False)
-        except:
-            os.remove(heatmap_path) #delete incomplete halfway saved heatmap
-            heatmap = compute_patch_similarities_to_vector(image_index=image_idx, concept_label=str(concept_label), 
-                                              images=images, embeddings=embeds,  cossims=cos_sims,
-                                              dataset_name='CLEVR', patch_size=patch_size, model_input_size=model_input_size,
-                                              save_path=None,
-                                              heatmap_path=heatmap_path, show_plot=False)
-            
-
+        # Get patch activations for this image to create heatmap
+        start_idx = image_idx * patches_per_image
+        end_idx = start_idx + patches_per_image
+        image_patch_acts = cos_sims[concept_label].iloc[start_idx:end_idx]
+        
+        # Reshape to 2D heatmap
+        heatmap = torch.tensor(image_patch_acts.values).reshape(patches_per_col, patches_per_row)
+        
         # Calculate the patch location
         left, top, right, bottom = calculate_patch_location(image, patch_idx, patch_size, model_input_size)
-
+        
         # Highlight the patch
         image_with_patch = make_image_with_highlighted_patch(image, left, top, right, bottom, model_input_size, grayscale=True)
         
@@ -391,16 +455,16 @@ def plot_most_similar_patches_w_heatmaps_and_corr_images(concept_label, images, 
         images_w_patches.append(image_with_patch)
     
     # Determine the global color scale range across all heatmaps
-    if not vmin or not vmax:
-        all_values = [value for heatmap in heatmaps.values() for row in heatmap for value in row]
+    if vmin is None or vmax is None:
+        all_values = [value.item() for heatmap in heatmaps.values() for row in heatmap for value in row]
         vmin, vmax = min(all_values), max(all_values)
     
     for i, patch_idx in enumerate(most_similar_patches):
-        image_idx = patch_idx // ((model_input_size[0] // patch_size) * (model_input_size[1] // patch_size))
-        image = images[image_idx]
+        image_idx = patch_idx // patches_per_image
+        image = loaded_images[image_idx]
         resized_image = pad_or_resize_img(image, model_input_size)
         
-        # Plot the original_image
+        # Plot the original image
         axes[0, i].imshow(resized_image)
         axes[0, i].set_title(f'Image {image_idx}')
         axes[0, i].axis('off')
@@ -408,25 +472,26 @@ def plot_most_similar_patches_w_heatmaps_and_corr_images(concept_label, images, 
         # Plot the image with highlighted patch and heatmap
         heatmap = heatmaps[image_idx]
         axes[1, i].imshow(images_w_patches[i], alpha=0.6)
-        heatmap_overlay = axes[1, i].imshow(heatmap, cmap='hot', alpha=0.4, extent=(0, model_input_size[0], model_input_size[1], 0),
+        heatmap_overlay = axes[1, i].imshow(heatmap, cmap='hot', alpha=0.4, 
+                                           extent=(0, model_input_size[0], model_input_size[1], 0),
                                            vmin=vmin, vmax=vmax)
-        axes[1, i].set_title(f'Heatmap Max = {round(heatmap.max().item(), 4)}\nHeatmap Min = {round(heatmap.min().item(), 4)}')
+        axes[1, i].set_title(f'Max = {round(heatmap.max().item(), 4)}\nMin = {round(heatmap.min().item(), 4)}')
         axes[1, i].axis('off')
-
-
-     # Add a color bar for the heatmaps
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # Adjust the position of the color bar
+    
+    # Add a color bar for the heatmaps
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
     cbar = plt.colorbar(heatmap_overlay, cax=cbar_ax)
     cbar.set_label(metric_type)
-
-    # Adjust layout to prevent overlap
-    plt.tight_layout(rect=[0, 0, 0.9, 1])  # Leave space for the color bar
     
-    plt.suptitle(f"Most Activated Test Patches by Concept {concept_label}", fontsize=16, y=1.05)
-                   
+    # Adjust layout to prevent overlap
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+    
+    plt.suptitle(f"Most Activated {'Test' if test_only else ''} Patches by Concept {concept_label}", fontsize=16, y=1.05)
+    
     if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True) if os.path.dirname(save_path) else None
         plt.savefig(save_path, dpi=500, bbox_inches='tight')
-      
+    
     plt.show()
     
 
@@ -457,7 +522,7 @@ def plot_patchsims_for_concept(concept_label, heatmaps, image_indices, images, m
 
     for i, image_index in enumerate(image_indices):
         # Retrieve the image and corresponding heatmap
-        image = images[image_index]
+        image = retrieve_image(image_index, dataset_name)
         heatmap = heatmaps[image_index]
 
         # Resize the image
@@ -498,7 +563,7 @@ def plot_patchsims_for_concept(concept_label, heatmaps, image_indices, images, m
     plt.show()
     
 
-def plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices, images,
+def plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices,
                                            model_input_size, dataset_name, top_n=7, 
                                            save_file=None, metric_type='Cosine Similarity', vmin=None, vmax=None):
     """
@@ -509,7 +574,6 @@ def plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices
         concept_labels (list of str): List of concept names to be visualized.
         image_indices (list of int): A list of image indices to visualize for the given concepts.
         heatmaps (dict): A dictionary where keys are image indices and values are precomputed heatmaps.
-        images (list of PIL.Image): A list of images.
         model_input_size (tuple): The dimensions (width, height) to which the image is resized for model input.
         dataset_name (str): Dataset name (default is 'CLEVR').
         save_file (str): Where to save the heatmap png. If None, the plot is not saved.
@@ -539,7 +603,7 @@ def plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices
 
     # First, plot the original images on the top row
     for i, image_index in enumerate(image_indices):
-        image = images[image_index]
+        image = retrieve_image(image_index, dataset_name)
         resized_image = pad_or_resize_img(image, model_input_size)
 
         ax_image = axes[0, i]  # Top row for images
@@ -558,7 +622,7 @@ def plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices
 
     # Then, loop through images and concepts to plot the heatmaps
     for i, image_index in enumerate(image_indices):
-        image = images[image_index]
+        image = retrieve_image(image_index, dataset_name)
         resized_image = pad_or_resize_img(image, model_input_size)
 
         for j, concept_label in enumerate(concept_labels):
@@ -590,7 +654,7 @@ def plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices
 
     plt.show()
     
-    
+
 def plot_patchsims_all_concepts(img_idx, heatmaps, model_input_size, dataset_name, 
                                 metric_type = 'Cosine Similarity', vmin=None, vmax=None, 
                                 sort_by_act=False, save_file=None):
@@ -651,6 +715,462 @@ def plot_patchsims_all_concepts(img_idx, heatmaps, model_input_size, dataset_nam
         plt.savefig(save_path, bbox_inches='tight', dpi=500)
         
     plt.show()
+
+
+def animate_patch_similarities(image_index, loader, dataset_name, model_input_size, 
+                              patch_size=14, save_path=None, fps=2, show_animation=True,
+                              skip_patches=1, max_frames=None, figsize=(12, 6)):
+    """
+    Creates an animation cycling through all patches in an image, showing similarity heatmaps.
+    
+    Args:
+        image_index (int): The index of the image in the dataset.
+        loader: ChunkedEmbeddingLoader instance for loading embeddings.
+        dataset_name (str): The name of the dataset.
+        model_input_size (tuple): The input size to which the image should be resized (width, height).
+        patch_size (int): The size of each patch.
+        save_path (str): Where to save the animation (as .gif or .mp4).
+        fps (int): Frames per second for the animation.
+        show_animation (bool): Whether to display the animation in the notebook.
+        skip_patches (int): Skip every N patches to reduce animation size (1 = no skip).
+        max_frames (int): Maximum number of frames to include (None = all patches).
+        figsize (tuple): Figure size (width, height) in inches.
+        
+    Returns:
+        matplotlib.animation.FuncAnimation: The animation object.
+    """
+    from matplotlib.animation import FuncAnimation
+    from IPython.display import HTML
+    import matplotlib
+    
+    # Set matplotlib parameters to reduce animation size
+    if show_animation:
+        matplotlib.rcParams['animation.embed_limit'] = 40  # Increase limit to 40MB
+    
+    # Retrieve the image
+    image = retrieve_image(image_index, dataset_name, test_only=False)
+    resized_image = pad_or_resize_img(image, model_input_size)
+    
+    # Calculate patch dimensions
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Calculate indices for all patches in the image
+    image_start_idx = image_index * patches_per_image
+    image_patch_indices = list(range(image_start_idx, image_start_idx + patches_per_image))
+    
+    # Load all embeddings for this image
+    embeddings = loader.load_specific_embeddings(image_patch_indices)
+    
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    
+    # Left plot: original image with highlighted patch
+    ax1.set_title(f'Image {image_index}')
+    ax1.axis('off')
+    
+    # Right plot: heatmap
+    ax2.set_title('Patch Similarity Heatmap')
+    ax2.axis('off')
+    
+    # Initialize plots
+    im1 = ax1.imshow(resized_image)
+    im2 = ax2.imshow(np.zeros((patches_per_col, patches_per_row)), cmap='hot', alpha=0.5, 
+                     extent=(0, model_input_size[0], model_input_size[1], 0), vmin=0, vmax=1)
+    im2_bg = ax2.imshow(resized_image, alpha=0.5)
+    
+    # Create colorbar
+    cbar = plt.colorbar(im2, ax=ax2)
+    cbar.set_label('Cosine Similarity with Selected Patch')
+    
+    # Rectangle for highlighting current patch
+    rect = plt.Rectangle((0, 0), patch_size, patch_size, 
+                        edgecolor='red', facecolor='none', linewidth=3)
+    ax1.add_patch(rect)
+    
+    def animate(frame):
+        """Update function for animation."""
+        patch_index_in_image = frame
+        
+        # Calculate patch position
+        row, col = divmod(patch_index_in_image, patches_per_row)
+        left = col * patch_size
+        top = row * patch_size
+        
+        # Update highlighted patch rectangle
+        rect.set_xy((left, top))
+        
+        # Get the selected patch embedding
+        selected_patch_embedding = embeddings[patch_index_in_image]
+        
+        # Compute cosine similarities with all patches
+        cos_sims = F.cosine_similarity(
+            selected_patch_embedding.unsqueeze(0),
+            embeddings
+        ).cpu()
+        
+        # Reshape to grid
+        cos_sim_grid = cos_sims.reshape(patches_per_col, patches_per_row)
+        
+        # Update heatmap
+        im2.set_array(cos_sim_grid)
+        im2.set_clim(cos_sim_grid.min(), cos_sim_grid.max())
+        
+        # Update title with current patch index
+        ax2.set_title(f'Similarity to Patch {patch_index_in_image} (Row {row}, Col {col})')
+        
+        return [rect, im2]
+    
+    # Determine which frames to include
+    if max_frames is not None:
+        frames = list(range(0, min(patches_per_image, max_frames), skip_patches))
+    else:
+        frames = list(range(0, patches_per_image, skip_patches))
+    
+    # Create animation
+    anim = FuncAnimation(fig, animate, frames=frames, 
+                        interval=1000/fps, blit=True, repeat=True)
+    
+    # Save animation if requested
+    if save_path:
+        if save_path.endswith('.gif'):
+            anim.save(save_path, writer='pillow', fps=fps)
+        else:
+            anim.save(save_path, writer='ffmpeg', fps=fps)
+        print(f"Animation saved to {save_path}")
+    
+    # Show animation
+    if show_animation:
+        plt.close()  # Close the static plot
+        return HTML(anim.to_jshtml())
+    else:
+        plt.show()
+        return anim
+
+
+def show_patch_similarities_grid(image_index, loader, dataset_name, model_input_size, 
+                                patch_size=14, n_patches_to_show=9, patch_indices=None):
+    """
+    Shows a grid of patch similarity heatmaps for selected patches in an image.
+    
+    Args:
+        image_index (int): The index of the image in the dataset.
+        loader: ChunkedEmbeddingLoader instance for loading embeddings.
+        dataset_name (str): The name of the dataset.
+        model_input_size (tuple): The input size to which the image should be resized (width, height).
+        patch_size (int): The size of each patch.
+        n_patches_to_show (int): Number of patches to show (if patch_indices not provided).
+        patch_indices (list): Specific patch indices to show (optional).
+        
+    Returns:
+        None: Displays the grid of images.
+    """
+    # Retrieve the image
+    image = retrieve_image(image_index, dataset_name, test_only=False)
+    resized_image = pad_or_resize_img(image, model_input_size)
+    
+    # Calculate patch dimensions
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Calculate indices for all patches in the image
+    image_start_idx = image_index * patches_per_image
+    image_patch_indices = list(range(image_start_idx, image_start_idx + patches_per_image))
+    
+    # Load all embeddings for this image
+    embeddings = loader.load_specific_embeddings(image_patch_indices)
+    
+    # Determine which patches to show
+    if patch_indices is None:
+        # Sample evenly across the image
+        step = max(1, patches_per_image // n_patches_to_show)
+        patch_indices = list(range(0, patches_per_image, step))[:n_patches_to_show]
+    
+    # Calculate grid layout
+    n_cols = min(3, len(patch_indices))
+    n_rows = (len(patch_indices) + n_cols - 1) // n_cols
+    
+    # Create figure
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 5))
+    if n_rows == 1:
+        axes = axes.reshape(1, -1)
+    elif n_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    # Plot each patch similarity
+    for idx, patch_idx in enumerate(patch_indices):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        ax = axes[row_idx, col_idx]
+        
+        # Calculate patch position
+        patch_row, patch_col = divmod(patch_idx, patches_per_row)
+        
+        # Get the selected patch embedding
+        selected_patch_embedding = embeddings[patch_idx]
+        
+        # Compute cosine similarities with all patches
+        cos_sims = F.cosine_similarity(
+            selected_patch_embedding.unsqueeze(0),
+            embeddings
+        ).cpu()
+        
+        # Reshape to grid
+        cos_sim_grid = cos_sims.reshape(patches_per_col, patches_per_row)
+        
+        # Plot the image with heatmap overlay
+        ax.imshow(resized_image)
+        heatmap = ax.imshow(cos_sim_grid, cmap='hot', alpha=0.5, 
+                           extent=(0, model_input_size[0], model_input_size[1], 0),
+                           vmin=0, vmax=1)
+        
+        # Highlight the selected patch
+        left = patch_col * patch_size
+        top = patch_row * patch_size
+        rect = plt.Rectangle((left, top), patch_size, patch_size,
+                           edgecolor='red', facecolor='none', linewidth=2)
+        ax.add_patch(rect)
+        
+        ax.set_title(f'Patch {patch_idx} (R{patch_row}, C{patch_col})')
+        ax.axis('off')
+    
+    # Hide empty subplots
+    for idx in range(len(patch_indices), n_rows * n_cols):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        axes[row_idx, col_idx].axis('off')
+    
+    plt.suptitle(f'Patch Similarities for Image {image_index}', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+
+def show_patch_similarities_simple(image_index, loader, dataset_name, model_input_size, 
+                                 patch_size=14, start_patch=None, end_patch=None, delay=0.5):
+    """
+    Simple version: Shows patch similarity heatmaps one after another.
+    
+    Args:
+        image_index (int): The index of the image in the dataset.
+        loader: ChunkedEmbeddingLoader instance for loading embeddings.
+        dataset_name (str): The name of the dataset.
+        model_input_size (tuple): The input size to which the image should be resized (width, height).
+        patch_size (int): The size of each patch.
+        start_patch (int): Starting patch index (local to image). If None, starts from 0.
+        end_patch (int): Ending patch index (local to image, exclusive). If None, goes to last patch.
+        delay (float): Delay in seconds between frames.
+    """
+    from IPython.display import clear_output, display
+    import time
+    
+    # Retrieve the image
+    image = retrieve_image(image_index, dataset_name, test_only=False)
+    resized_image = pad_or_resize_img(image, model_input_size)
+    
+    # Calculate patch dimensions
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Calculate indices for all patches in the image
+    image_start_idx = image_index * patches_per_image
+    image_patch_indices = list(range(image_start_idx, image_start_idx + patches_per_image))
+    
+    # Load all embeddings for this image
+    embeddings = loader.load_specific_embeddings(image_patch_indices)
+    
+    # Determine patch range
+    if start_patch is None:
+        start_patch = 0
+    if end_patch is None:
+        end_patch = patches_per_image
+    
+    # Validate range
+    start_patch = max(0, min(start_patch, patches_per_image - 1))
+    end_patch = max(start_patch + 1, min(end_patch, patches_per_image))
+    
+    # Create list of patches to show
+    patches_to_show = list(range(start_patch, end_patch))
+    
+    print(f"Showing patches {start_patch} to {end_patch-1} ({len(patches_to_show)} total patches)...")
+    
+    # Pre-compute min/max values across all patches for consistent colorbar
+    all_similarities = []
+    for patch_idx in patches_to_show:
+        selected_patch_embedding = embeddings[patch_idx]
+        cos_sims = F.cosine_similarity(
+            selected_patch_embedding.unsqueeze(0),
+            embeddings
+        ).cpu()
+        all_similarities.append(cos_sims)
+    
+    # Find global min/max for consistent color scaling
+    vmin = min(sims.min().item() for sims in all_similarities)
+    vmax = max(sims.max().item() for sims in all_similarities)
+    
+    # Show each frame
+    for i, patch_idx in enumerate(patches_to_show):
+        # Clear previous output
+        clear_output(wait=True)
+        
+        # Calculate patch position
+        patch_row, patch_col = divmod(patch_idx, patches_per_row)
+        
+        # Use pre-computed similarities
+        cos_sims = all_similarities[i]
+        
+        # Reshape to grid
+        cos_sim_grid = cos_sims.reshape(patches_per_col, patches_per_row)
+        
+        # Create figure with colorbar space
+        fig, ax = plt.subplots(figsize=(5, 4))
+        
+        # Display the image
+        ax.imshow(resized_image)
+        
+        # Overlay the similarity heatmap with consistent scale
+        im = ax.imshow(cos_sim_grid, cmap='hot', alpha=0.5, 
+                       extent=(0, model_input_size[0], model_input_size[1], 0),
+                       vmin=vmin, vmax=vmax)
+        
+        # Highlight the selected patch with red rectangle
+        left = patch_col * patch_size
+        top = patch_row * patch_size
+        rect = plt.Rectangle((left, top), patch_size, patch_size,
+                           edgecolor='red', facecolor='none', linewidth=2)
+        ax.add_patch(rect)
+        
+        # Add colorbar with consistent scale
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Cosine Similarity', rotation=270, labelpad=15)
+        
+        ax.set_title(f'Patch {patch_idx} (Row {patch_row}, Col {patch_col}) - Frame {i+1}/{len(patches_to_show)}')
+        ax.axis('off')
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Wait before next frame
+        if i < len(patches_to_show) - 1:
+            time.sleep(delay)
+    
+    print("Animation complete!")
+
+
+def show_patch_similarities_sequence(image_index, loader, dataset_name, model_input_size, 
+                                   patch_size=14, n_patches_to_show=20, delay=0.5, interactive=False):
+    """
+    Shows patch similarity heatmaps one after another with a delay, creating an animation effect.
+    
+    Args:
+        image_index (int): The index of the image in the dataset.
+        loader: ChunkedEmbeddingLoader instance for loading embeddings.
+        dataset_name (str): The name of the dataset.
+        model_input_size (tuple): The input size to which the image should be resized (width, height).
+        patch_size (int): The size of each patch.
+        n_patches_to_show (int): Number of patches to show in sequence.
+        delay (float): Delay in seconds between frames.
+        interactive (bool): If True, use interactive mode for smoother updates.
+    """
+    from IPython.display import clear_output, display
+    import time
+    
+    if interactive:
+        plt.ion()  # Turn on interactive mode
+    
+    # Retrieve the image
+    image = retrieve_image(image_index, dataset_name, test_only=False)
+    resized_image = pad_or_resize_img(image, model_input_size)
+    
+    # Calculate patch dimensions
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Calculate indices for all patches in the image
+    image_start_idx = image_index * patches_per_image
+    image_patch_indices = list(range(image_start_idx, image_start_idx + patches_per_image))
+    
+    # Load all embeddings for this image
+    embeddings = loader.load_specific_embeddings(image_patch_indices)
+    
+    # Sample patches evenly
+    step = max(1, patches_per_image // n_patches_to_show)
+    patches_to_show = list(range(0, patches_per_image, step))[:n_patches_to_show]
+    
+    # Create figure once if using interactive mode
+    if interactive:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+        plt.show(block=False)
+    
+    # Create figure that we'll update
+    for i, patch_idx in enumerate(patches_to_show):
+        if not interactive:
+            # Clear previous output and create new figure
+            clear_output(wait=True)
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+        else:
+            # Clear axes for updating
+            ax1.clear()
+            ax2.clear()
+        
+        # Calculate patch position
+        patch_row, patch_col = divmod(patch_idx, patches_per_row)
+        
+        # Left: Original image with highlighted patch
+        ax1.imshow(resized_image)
+        left = patch_col * patch_size
+        top = patch_row * patch_size
+        rect = plt.Rectangle((left, top), patch_size, patch_size,
+                           edgecolor='red', facecolor='none', linewidth=3)
+        ax1.add_patch(rect)
+        ax1.set_title(f'Image {image_index} - Patch {patch_idx}')
+        ax1.axis('off')
+        
+        # Get the selected patch embedding and compute similarities
+        selected_patch_embedding = embeddings[patch_idx]
+        cos_sims = F.cosine_similarity(
+            selected_patch_embedding.unsqueeze(0),
+            embeddings
+        ).cpu()
+        
+        # Reshape to grid
+        cos_sim_grid = cos_sims.reshape(patches_per_col, patches_per_row)
+        
+        # Right: Heatmap overlay
+        ax2.imshow(resized_image, alpha=0.5)
+        heatmap = ax2.imshow(cos_sim_grid, cmap='hot', alpha=0.5, 
+                           extent=(0, model_input_size[0], model_input_size[1], 0),
+                           vmin=0, vmax=1)
+        ax2.set_title(f'Similarity to Patch {patch_idx} (Row {patch_row}, Col {patch_col})')
+        ax2.axis('off')
+        
+        # Add colorbar
+        cbar = fig.colorbar(heatmap, ax=ax2, fraction=0.046, pad=0.04)
+        cbar.set_label('Cosine Similarity')
+        
+        plt.suptitle(f'Frame {i+1}/{len(patches_to_show)}', fontsize=14)
+        plt.tight_layout()
+        
+        if interactive:
+            # Update the display
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+        else:
+            # Show the figure
+            display(fig)
+            plt.close(fig)
+        
+        # Wait before showing next frame (except for last frame)
+        if i < len(patches_to_show) - 1:
+            time.sleep(delay)
+    
+    if interactive:
+        plt.ioff()  # Turn off interactive mode
+        
+    print(f"\nAnimation complete! Showed {len(patches_to_show)} patches.")
 
 
 def plot_patches_sim_to_vector(cos_sim_grid, resized_image, patch_size, image_index, patch_index_in_image, save_path=None, plot_title=None, bar_title=None, show_plot=True):
@@ -718,7 +1238,7 @@ def binarize_patchsims_for_concept(concept_label, threshold, heatmaps, image_ind
     
     for i, image_index in enumerate(image_indices):
         # Retrieve image and heatmap
-        image = images[image_index]
+        image = retrieve_image(image_index, dataset_name)
         heatmap = heatmaps[image_index]
         
         # Resize image to the model's input size
@@ -795,7 +1315,7 @@ def plot_binarized_patchsims_all_concepts(concept_labels, percentile, heatmaps, 
 
     # Plot original images in the top row
     for i, image_index in enumerate(image_indices):
-        image = images[image_index]
+        image = retrieve_image(image_index, dataset_name)
         resized_image = pad_or_resize_img(image, model_input_size)
         axes[0, i].imshow(resized_image)
         axes[0, i].set_title(f'Image {image_index}')
@@ -825,7 +1345,7 @@ def plot_binarized_patchsims_all_concepts(concept_labels, percentile, heatmaps, 
             mask_resized = np.array(mask_resized) > 127
             
             # Convert image to normalized RGB numpy array
-            image = images[image_index]
+            image = retrieve_image(image_index, dataset_name)
             resized_image = pad_or_resize_img(image, model_input_size)
             image_np = np.array(resized_image.convert("RGB")) / 255.0
             
@@ -1463,6 +1983,336 @@ def plot_binarized_patchsims_with_raw_heatmaps(
 #     if save_file:
 #         plt.savefig(save_file, dpi=300)
 #     plt.show()
+def filter_and_plot_concept_images(
+    metadata_path,
+    required_concepts,
+    chosen_split='train',
+    start_idx=0,
+    n_images=10,
+    plot=True
+):
+    """
+    Filters metadata for rows with specified binary concepts and plots first n image thumbnails.
+
+    Args:
+        metadata_path (str): Path to metadata CSV.
+        required_concepts (list): Concept column names required to be 1 (e.g., ['has_color_red']).
+        chosen_split (str): Split to filter on ('train', 'test', etc.).
+        n_images (int): Number of matching images to display.
+        plot (bool): Whether to plot the images.
+
+    Returns:
+        list: Indices of the filtered rows.
+    """
+    metadata = pd.read_csv(metadata_path)
+
+    # Validate concept columns
+    for concept in required_concepts:
+        if concept not in metadata.columns:
+            raise ValueError(f"Missing concept column: {concept}")
+
+    # Apply filtering
+    mask = metadata['split'] == chosen_split
+    for concept in required_concepts:
+        mask &= metadata[concept] == 1
+
+    filtered_df = metadata[mask][start_idx:start_idx+n_images]
+
+    if plot:
+        fig, axes = plt.subplots(1, len(filtered_df), figsize=(3 * len(filtered_df), 3))
+        if len(filtered_df) == 1:
+            axes = [axes]  # make iterable
+
+        for ax, (_, row) in zip(axes, filtered_df.iterrows()):
+            try:
+                img = Image.open(f'../Data/Coco/{row["image_path"]}')
+                ax.imshow(img)
+                ax.axis('off')
+                ax.set_title(row['image_path'].split('/')[-1])
+            except Exception as e:
+                ax.text(0.5, 0.5, "Image load failed", ha='center')
+                ax.axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+    return filtered_df.index.tolist()
+
+
+def plot_aligned_images_chunked(concept_key, dataset_name, acts_loader, 
+                               con_label='', k=5, metric_type='Cosine Similarity', 
+                               save_image=False, test_only=True):
+    """
+    Chunked version: Plot images that align well with a selected concept using pre-initialized loader.
+    
+    Args:
+        concept_key (str): The concept to visualize (e.g., 'color::red').
+        dataset_name (str): Name of the dataset.
+        acts_loader: Pre-initialized ChunkedActivationLoader instance.
+        con_label (str): Label to put in path of saved image.
+        k (int): Number of top images to display.
+        metric_type (str): Type of metric being visualized.
+        save_image (bool): Whether to save the plot.
+        test_only (bool): Whether to only consider test samples.
+    """
+    
+    # Load the full dataframe (this handles chunking internally)
+    comp_df = acts_loader.load_full_dataframe()
+    
+    # Filter for test samples if requested
+    if test_only:
+        metadata = pd.read_csv(f'../Data/{dataset_name}/metadata.csv')
+        test_indices = metadata[metadata['split'] == 'test'].index
+        comp_df = comp_df.loc[comp_df.index.intersection(test_indices)]
+    
+    # Check if concept exists
+    if concept_key not in comp_df.columns:
+        print(f"Concept '{concept_key}' not found. Available concepts:")
+        print(sorted(comp_df.columns)[:10], "...")
+        return
+    
+    # Get top k samples
+    top_k_indices = comp_df.nlargest(k, concept_key).index.tolist()
+    
+    # Calculate grid layout
+    n_cols = min(k, 5)
+    n_rows = (k + 4) // 5
+    
+    # Create figure
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5 * n_rows))
+    if n_rows == 1:
+        axes = axes.reshape(1, -1)
+    axes = axes.flatten()
+    
+    plt.suptitle(f"Top {k} Images with Highest {metric_type} to: {concept_key}", fontsize=16)
+    
+    for rank, idx in enumerate(top_k_indices):
+        if rank >= len(axes):
+            break
+        
+        # Retrieve image
+        img = retrieve_image(idx, dataset_name, test_only=False)
+        value = comp_df.loc[idx, concept_key]
+        
+        axes[rank].imshow(img)
+        axes[rank].set_title(f"Rank {rank+1}: Image {idx}\n{metric_type} = {value:.4f}")
+        axes[rank].axis('off')
+    
+    # Hide unused axes
+    for rank in range(len(top_k_indices), len(axes)):
+        axes[rank].axis('off')
+    
+    plt.tight_layout()
+    
+    if save_image:
+        save_path = f'../Figs/{dataset_name}/most_aligned_w_concepts/concept_{concept_key}_{k}__{con_label}.jpg'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches='tight', dpi=500)
+    
+    plt.show()
+
+
+def plot_most_similar_patches_w_heatmaps_chunked(concept_label, dataset_name, acts_loader, 
+                                                embeds_loader, con_label='', 
+                                                model_input_size=(224, 224), top_n=5, 
+                                                metric_type='Cosine Similarity', test_only=True,
+                                                save_path=None):
+    """
+    Chunked version: Plots the most similar patches with heatmaps using pre-initialized loaders.
+    
+    Args:
+        concept_label (str): The concept to visualize.
+        dataset_name (str): Name of the dataset.
+        acts_loader: Pre-initialized ChunkedActivationLoader instance.
+        embeds_loader: Pre-initialized ChunkedEmbeddingLoader instance.
+        con_label (str): Label for saving.
+        model_input_size (tuple): Model input size.
+        top_n (int): Number of top patches to show.
+        metric_type (str): Type of metric.
+        test_only (bool): Whether to only use test samples.
+        save_path (str): Where to save the figure.
+    """
+    # Load all images
+    all_images, _, _ = load_images(dataset_name)
+    
+    # Load activations
+    cos_sims = acts_loader.load_full_dataframe()
+    
+    # Filter for test samples if needed
+    if test_only:
+        split_df = get_patch_split_df(dataset_name, patch_size=14, model_input_size=model_input_size)
+        test_indices = split_df[split_df == 'test'].index
+        cos_sims = cos_sims.loc[cos_sims.index.intersection(test_indices)]
+    
+    # Get top patches
+    if concept_label not in cos_sims.columns:
+        print(f"Concept '{concept_label}' not found.")
+        return
+    
+    concept_cos_sims = cos_sims[concept_label]
+    most_similar_patches = concept_cos_sims.nlargest(top_n).index.tolist()
+    
+    # Create figure
+    fig, axes = plt.subplots(2, top_n, figsize=(top_n * 3, 6))
+    if top_n == 1:
+        axes = axes.reshape(2, 1)
+    
+    # Process each top patch
+    for i, patch_idx in enumerate(most_similar_patches):
+        # Get image index and patch info
+        patches_per_image = (model_input_size[0] // 14) * (model_input_size[1] // 14)
+        image_idx = patch_idx // patches_per_image
+        patch_in_image = patch_idx % patches_per_image
+        
+        image = all_images[image_idx]
+        resized_image = pad_or_resize_img(image, model_input_size)
+        
+        # Plot original image
+        axes[0, i].imshow(resized_image)
+        axes[0, i].set_title(f'Image {image_idx}')
+        axes[0, i].axis('off')
+        
+        # Calculate patch location and highlight
+        patches_per_row = model_input_size[0] // 14
+        patch_row, patch_col = divmod(patch_in_image, patches_per_row)
+        left = patch_col * 14
+        top = patch_row * 14
+        
+        # Create highlighted version
+        image_with_patch = resized_image.copy()
+        draw = ImageDraw.Draw(image_with_patch)
+        draw.rectangle([left, top, left + 14, top + 14], outline="red", width=3)
+        
+        # Load embeddings for this image's patches
+        image_start_idx = image_idx * patches_per_image
+        image_patch_indices = list(range(image_start_idx, image_start_idx + patches_per_image))
+        image_embeddings = embeds_loader.load_specific_embeddings(image_patch_indices)
+        
+        # Get concept vector (you might need to load this separately)
+        # For now, using the embedding of the top patch as a proxy
+        concept_vector = image_embeddings[patch_in_image]
+        
+        # Compute similarities for heatmap
+        similarities = F.cosine_similarity(
+            concept_vector.unsqueeze(0),
+            image_embeddings
+        ).cpu().reshape(model_input_size[1] // 14, model_input_size[0] // 14)
+        
+        # Plot heatmap
+        axes[1, i].imshow(image_with_patch.convert('L'), cmap='gray', alpha=0.4)
+        heatmap = axes[1, i].imshow(similarities, cmap='hot', alpha=0.6,
+                                   extent=[0, model_input_size[0], model_input_size[1], 0])
+        axes[1, i].set_title(f'Similarity: {concept_cos_sims.iloc[patch_idx]:.3f}')
+        axes[1, i].axis('off')
+    
+    plt.suptitle(f"Top {top_n} Patches for Concept: {concept_label}", fontsize=16)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=500, bbox_inches='tight')
+    
+    plt.show()
+
+
+def plot_patchsims_all_concepts_from_loader(img_idx, concept_labels, acts_loader, dataset_name,
+                                           model_input_size=(224, 224), patch_size=14,
+                                           metric_type='Cosine Similarity', vmin=None, vmax=None, 
+                                           sort_by_act=False, save_file=None):
+    """
+    Wrapper: Uses activation loader to create heatmaps and plot all concepts for one image.
+    
+    Args:
+        img_idx (int): Index of the image.
+        concept_labels (list): List of concept names to visualize.
+        acts_loader: ChunkedActivationLoader instance.
+        dataset_name (str): Dataset name.
+        model_input_size (tuple): Model input size.
+        patch_size (int): Size of patches.
+        Other args same as plot_patchsims_all_concepts.
+    """
+    # Load activations
+    cos_sims = acts_loader.load_full_dataframe()
+    
+    # Calculate patches per image
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Get patch indices for this image
+    start_idx = img_idx * patches_per_image
+    end_idx = start_idx + patches_per_image
+    
+    # Extract activations for this image and reshape into heatmaps
+    heatmaps = {}
+    for concept in concept_labels:
+        if concept in cos_sims.columns:
+            # Get activations for all patches in this image
+            image_acts = cos_sims[concept].iloc[start_idx:end_idx]
+            # Reshape into 2D heatmap
+            heatmap = torch.tensor(image_acts.values).reshape(patches_per_col, patches_per_row)
+            heatmaps[concept] = heatmap
+        else:
+            print(f"Warning: Concept '{concept}' not found in activations")
+    
+    # Call the existing function
+    plot_patchsims_all_concepts(img_idx, heatmaps, model_input_size, dataset_name,
+                               metric_type, vmin, vmax, sort_by_act, save_file)
+
+
+def plot_patchsims_heatmaps_all_concepts_from_loader(concept_labels, image_indices, acts_loader, 
+                                                    dataset_name, model_input_size=(224, 224), 
+                                                    patch_size=14, top_n=7, save_file=None, 
+                                                    metric_type='Cosine Similarity', vmin=None, vmax=None):
+    """
+    Wrapper: Uses activation loader to create heatmaps for multiple concepts across multiple images.
+    
+    Args:
+        concept_labels (list): List of concept names.
+        image_indices (list): List of image indices to visualize.
+        acts_loader: ChunkedActivationLoader instance.
+        dataset_name (str): Dataset name.
+        model_input_size (tuple): Model input size.
+        patch_size (int): Size of patches.
+        Other args same as plot_patchsims_heatmaps_all_concepts.
+    """
+    # Load all images
+    all_images, _, _ = load_images(dataset_name)
+    
+    # Load activations
+    cos_sims = acts_loader.load_full_dataframe()
+    
+    # Calculate patches per image
+    patches_per_row = model_input_size[0] // patch_size
+    patches_per_col = model_input_size[1] // patch_size
+    patches_per_image = patches_per_row * patches_per_col
+    
+    # Create heatmaps dictionary structure
+    heatmaps = {}
+    for concept in concept_labels:
+        if concept not in cos_sims.columns:
+            print(f"Warning: Concept '{concept}' not found")
+            continue
+        heatmaps[concept] = {}
+        
+        for img_idx in image_indices:
+            # Get patch indices for this image
+            start_idx = img_idx * patches_per_image
+            end_idx = start_idx + patches_per_image
+            
+            # Extract and reshape activations
+            image_acts = cos_sims[concept].iloc[start_idx:end_idx]
+            heatmap = torch.tensor(image_acts.values).reshape(patches_per_col, patches_per_row)
+            heatmaps[concept][img_idx] = heatmap
+    
+    # Use only the first top_n images
+    image_indices = image_indices[:top_n]
+    
+    # Call the existing function
+    plot_patchsims_heatmaps_all_concepts(concept_labels, heatmaps, image_indices, all_images,
+                                       model_input_size, dataset_name, top_n, 
+                                       save_file, metric_type, vmin, vmax)
+
+
 def plot_superpatches_on_heatmaps(
     concept_labels, heatmaps, image_index, images,
     thresholds, metric_type, model_input_size,
@@ -1543,6 +2393,263 @@ def plot_superpatches_on_heatmaps(
     if save_file:
         plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight')
     plt.show()
+
+
+def plot_best_detecting_clusters_calibrated(dataset_name: str,
+                                           model_name: str,
+                                           sample_type: str,
+                                           n_clusters: int,
+                                           acts_loader,
+                                           concepts_to_show=None,
+                                           top_n_clusters: int = 3,
+                                           top_n_samples: int = 5,
+                                           metric: str = 'f1',
+                                           model_input_size=None,
+                                           test_only: bool = True,
+                                           percent_thru_model: int = 100,
+                                           save_dir=None):
+    """
+    Plot the best detecting clusters for concepts, using the percentile that performed best on calibration set.
+    
+    Args:
+        dataset_name: Name of dataset
+        model_name: Name of model (e.g., 'CLIP', 'Llama')
+        sample_type: 'patch' or 'cls'
+        n_clusters: Number of clusters in k-means
+        acts_loader: Activation loader
+        concepts_to_show: List of specific concepts to show (None for all)
+        top_n_clusters: Number of best clusters to show per concept
+        top_n_samples: Number of samples to show per cluster
+        metric: Metric to use for ranking clusters ('f1', 'precision', 'recall')
+        model_input_size: Model input size (required for patch)
+        test_only: Whether to use only test samples
+        percent_thru_model: Percentage through model
+        save_dir: Directory to save figures
+    """
+    from calibration_selection_utils import find_best_percentile_from_calibration_allpairs
+    import ast
+    
+    # Construct concept label
+    con_label = f"{model_name}_kmeans_{n_clusters}_{sample_type}_embeddings_kmeans_percentthrumodel_{percent_thru_model}"
+    
+    # Find best percentile using calibration results
+    print(f"Finding best percentile using calibration set performance...")
+    try:
+        best_percentile, cal_matches = find_best_percentile_from_calibration_allpairs(
+            dataset_name, 
+            con_label,
+            concepts_to_include=concepts_to_show,
+            metric=metric
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        print("Make sure you've run all_detection_stats.py to generate calibration results.")
+        return
+    
+    print(f"Selected percentile {best_percentile} based on calibration {metric}")
+    
+    # Load test results at the best percentile
+    test_path = f"Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{best_percentile}_{con_label}.csv"
+    
+    if not os.path.exists(test_path):
+        print(f"Test results not found at best percentile: {test_path}")
+        return
+    
+    # Load and parse test results
+    test_df = pd.read_csv(test_path)
+    
+    # Parse concept column and find best clusters for each concept on test set
+    test_matches = {}
+    
+    for concept in cal_matches.keys():
+        concept_rows = []
+        for _, row in test_df.iterrows():
+            concept_tuple = ast.literal_eval(row['concept'])
+            if concept_tuple[0] == concept:
+                concept_rows.append({
+                    'cluster_id': concept_tuple[1],
+                    metric: row[metric]
+                })
+        
+        if concept_rows:
+            concept_df = pd.DataFrame(concept_rows)
+            top_clusters = concept_df.nlargest(top_n_clusters, metric)
+            test_matches[concept] = [
+                (row['cluster_id'], row[metric]) 
+                for _, row in top_clusters.iterrows()
+            ]
+    
+    # Create save directory if specified
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+    
+    # Plot results
+    print(f"\nShowing best detecting clusters at percentile {best_percentile}:")
+    print("="*60)
+    
+    for concept_name, cluster_list in test_matches.items():
+        print(f"\nConcept: {concept_name}")
+        print(f"Calibration best: cluster {cal_matches[concept_name][0]} ({metric}={cal_matches[concept_name][1]:.3f})")
+        print(f"Test set top {top_n_clusters} clusters:")
+        
+        for cluster_id, metric_value in cluster_list:
+            print(f"  - Cluster {cluster_id}: {metric}={metric_value:.3f}")
+        
+        # Plot based on sample type
+        if sample_type == 'cls':
+            # For CLS, create subplot for all clusters
+            n_cols = min(top_n_clusters, len(cluster_list))
+            fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
+            if n_cols == 1:
+                axes = [axes]
+            
+            for idx, (cluster_id, metric_value) in enumerate(cluster_list[:n_cols]):
+                plt.sca(axes[idx])
+                
+                # Use existing visualization function
+                plot_aligned_images(
+                    acts_loader=acts_loader,
+                    con_label=f"cluster_{cluster_id}",
+                    concept_key=str(cluster_id),
+                    k=top_n_samples,
+                    dataset_name=dataset_name,
+                    metric_type=f'Cluster {cluster_id} Activation',
+                    save_image=False,
+                    test_only=test_only
+                )
+                
+                axes[idx].set_title(f'Cluster {cluster_id} → {concept_name}\n({metric}={metric_value:.3f}, percentile={best_percentile})')
+            
+            plt.suptitle(f'Best Detecting Clusters for "{concept_name}" (Cal-selected p={best_percentile})', fontsize=14, y=1.02)
+            plt.tight_layout()
+            
+            if save_dir:
+                save_path = os.path.join(save_dir, f"{concept_name.replace('::', '_')}_best_clusters_p{best_percentile}.png")
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.show()
+            
+        elif sample_type == 'patch':
+            # For patch embeddings, show heatmaps
+            if model_input_size is None:
+                raise ValueError("model_input_size required for patch visualization")
+            
+            for idx, (cluster_id, metric_value) in enumerate(cluster_list):
+                plot_most_similar_patches_w_heatmaps_and_corr_images(
+                    concept_label=str(cluster_id),
+                    acts_loader=acts_loader,
+                    con_label=f"{concept_name}_cluster_{cluster_id}_p{best_percentile}",
+                    dataset_name=dataset_name,
+                    model_input_size=model_input_size,
+                    top_n=top_n_samples,
+                    metric_type=f'Cluster {cluster_id} → {concept_name} ({metric}={metric_value:.3f}, p={best_percentile})',
+                    test_only=test_only,
+                    save_path=f"{save_dir}/{concept_name.replace('::', '_')}_cluster_{cluster_id}_p{best_percentile}.png" if save_dir else None
+                )
+
+
+def compare_calibration_vs_fixed_percentiles(dataset_name: str,
+                                            model_name: str,
+                                            sample_type: str,
+                                            n_clusters: int,
+                                            fixed_percentiles=None,
+                                            metric: str = 'f1',
+                                            percent_thru_model: int = 100):
+    """
+    Compare performance of calibration-selected percentile vs fixed percentiles.
+    
+    Args:
+        dataset_name: Name of dataset
+        model_name: Model name
+        sample_type: 'patch' or 'cls'
+        n_clusters: Number of clusters
+        fixed_percentiles: List of fixed percentiles to compare against
+        metric: Metric to compare
+        percent_thru_model: Percentage through model
+    """
+    from calibration_selection_utils import find_best_percentile_from_calibration_allpairs
+    import ast
+    
+    if fixed_percentiles is None:
+        fixed_percentiles = [0.1, 0.5, 0.9]
+    
+    con_label = f"{model_name}_kmeans_{n_clusters}_{sample_type}_embeddings_kmeans_percentthrumodel_{percent_thru_model}"
+    
+    # Get calibration-selected percentile
+    try:
+        best_percentile, cal_matches = find_best_percentile_from_calibration_allpairs(
+            dataset_name, con_label, metric=metric
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+    
+    # Compare performance
+    results = []
+    
+    # Add calibration-selected result
+    test_path = f"Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{best_percentile}_{con_label}.csv"
+    if os.path.exists(test_path):
+        test_df = pd.read_csv(test_path)
+        # Calculate average best metric for each concept
+        concept_best_metrics = []
+        for concept in cal_matches.keys():
+            concept_rows = []
+            for _, row in test_df.iterrows():
+                concept_tuple = ast.literal_eval(row['concept'])
+                if concept_tuple[0] == concept:
+                    concept_rows.append(row[metric])
+            if concept_rows:
+                concept_best_metrics.append(max(concept_rows))
+        
+        results.append({
+            'method': f'Calibration-selected (p={best_percentile})',
+            'percentile': best_percentile,
+            f'test_avg_best_{metric}': np.mean(concept_best_metrics)
+        })
+    
+    # Add fixed percentile results
+    for p in fixed_percentiles:
+        test_path = f"Quant_Results/{dataset_name}/detectionmetrics_allpairs_per_{p}_{con_label}.csv"
+        if os.path.exists(test_path):
+            test_df = pd.read_csv(test_path)
+            concept_best_metrics = []
+            for concept in cal_matches.keys():
+                concept_rows = []
+                for _, row in test_df.iterrows():
+                    concept_tuple = ast.literal_eval(row['concept'])
+                    if concept_tuple[0] == concept:
+                        concept_rows.append(row[metric])
+                if concept_rows:
+                    concept_best_metrics.append(max(concept_rows))
+            
+            results.append({
+                'method': f'Fixed (p={p})',
+                'percentile': p,
+                f'test_avg_best_{metric}': np.mean(concept_best_metrics)
+            })
+    
+    # Create comparison plot
+    results_df = pd.DataFrame(results)
+    
+    plt.figure(figsize=(10, 6))
+    colors = ['green' if 'Calibration' in row['method'] else 'blue' for _, row in results_df.iterrows()]
+    bars = plt.bar(results_df['method'], results_df[f'test_avg_best_{metric}'], color=colors)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, results_df[f'test_avg_best_{metric}']):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                f'{value:.3f}', ha='center', va='bottom')
+    
+    plt.ylabel(f'Average Best {metric.upper()} on Test Set')
+    plt.title(f'Calibration-Selected vs Fixed Percentiles\n{dataset_name} - {model_name} {sample_type} (n_clusters={n_clusters})')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
+    
+    print("\nComparison Results:")
+    print(results_df.to_string(index=False))
+    
+    return results_df
 
 
 

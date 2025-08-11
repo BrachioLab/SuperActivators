@@ -11,10 +11,9 @@ from gt_concept_segmentation_utils import map_concepts_to_image_indices, map_con
 
 PERCENT_THRU_MODEL = 100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SAMPLE_TYPES = ['cls', 'patch']
-# DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces']
-DATASETS = DATASETS = ['Coco']
-MODEL_INPUT_SIZES = [(224, 224), (560, 560)]
+SAMPLE_TYPES = ['patch']
+DATASETS = ['CLEVR']
+MODEL_INPUT_SIZES = [(224, 224)]  # Only CLIP input size
 
 
 if __name__ == "__main__":
