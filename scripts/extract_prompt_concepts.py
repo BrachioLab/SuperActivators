@@ -11,9 +11,9 @@ from vllm import LLM
 
 import sys
 sys.path.append('/workspace/Experiments')
-# from src.datasets import ImageDataset  # Not used - using FixedImageDataset instead
-from src.inversion_methods import prompt_inversion
-from src.prompt_concepts import LLMNet, RawInput
+# from utils.datasets import ImageDataset  # Not used - using FixedImageDataset instead
+from utils.inversion_methods import prompt_inversion
+from utils.prompt_concepts import LLMNet, RawInput
 from utils.quant_concept_evals_utils import compute_concept_thresholds
 
 

@@ -3,7 +3,7 @@
 import pandas as pd
 from torch.utils.data import Dataset
 
-from .utils.general_utils import load_images, retrieve_present_concepts
+from .general_utils import load_images, retrieve_present_concepts
 
 
 class ImageDataset(Dataset):
