@@ -15,7 +15,7 @@ cd ../
 python pretrained_saes.py --models CLIP --datasets CLEVR --sample-types patch
 ```
 
-This creates SAE activation files in `/scratch/cgoldberg/SAE_Acts/{dataset}/`
+This creates SAE activation files in `SCRATCH_DIR/SAE_Acts/{dataset}/`
 
 ### 2. Run Full Evaluation Pipeline
 ```bash
@@ -79,7 +79,7 @@ python run_full_sae_pipeline.py --models CLIP --datasets CLEVR COCO --sample-typ
 
 ## Output Files
 
-- **Alignment**: `/scratch/cgoldberg/Concepts/{dataset}/sae_alignment_{model}_{sae}_{sample_type}_*.pt`
+- **Alignment**: `SCRATCH_DIR/Concepts/{dataset}/sae_alignment_{model}_{sae}_{sample_type}_*.pt`
 - **Thresholds**: `Metrics/{dataset}/concept_thresholds_{model}_{sae}_{sample_type}_*.pt`
 - **Detection Metrics**: `Metrics/{dataset}/detection_metrics_{model}_{sae}_{sample_type}_*.pt`
 - **Inversions**: `Inversions/{dataset}/{model}_{sae}_{sample_type}_*/`

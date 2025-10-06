@@ -28,7 +28,7 @@ actual_percent = layer_to_percent(33, 42, zero_indexed=True, model_name="Gemma-S
 print(f"Using PERCENT_THRU_MODEL = {PERCENT_THRU_MODEL}% (should be ~{actual_percent:.1f}%)\n")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_DATASET_NAMES = ['Sarcasm', 'iSarcasm', 'GoEmotions']
-SCRATCH_DIR = '/scratch/cgoldberg/'
+SCRATCH_DIR = ''
 
 # SAE-specific configuration for Gemma-2-9B
 MODEL_NAME = "google/gemma-2-9b"

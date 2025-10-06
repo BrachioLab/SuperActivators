@@ -28,7 +28,7 @@ This pipeline processes SAE activations efficiently by maintaining sparsity thro
 ```bash
 python compute_activations_sae_sparse.py --datasets CLEVR --sample-type patch
 ```
-- Outputs to: `/scratch/cgoldberg/SAE_Activations_Sparse/`
+- Outputs to: `SCRATCH_DIR/SAE_Activations_Sparse/`
 - Saves as Top-K sparse format
 
 ### Step 2: Prune SAE Units
@@ -38,7 +38,7 @@ python prune_sae_units_sparse.py --datasets CLEVR --models CLIP --clip-target 50
 - Computes unit statistics from sparse activations
 - Applies pruning criteria (activity, strength, selectivity)
 - Filters sparse activations to kept units only
-- Outputs to: `/scratch/cgoldberg/SAE_Activations_Filtered/`
+- Outputs to: `SCRATCH_DIR/SAE_Activations_Filtered/`
 
 ### Step 3: Compute Thresholds
 ```bash
@@ -46,7 +46,7 @@ python sae_validation_thresholds_sparse.py --datasets CLEVR --models CLIP
 ```
 - Computes percentile thresholds per unit
 - Works with filtered sparse activations
-- Outputs to: `/scratch/cgoldberg/Thresholds/`
+- Outputs to: `SCRATCH_DIR/Thresholds/`
 
 ### Step 4: Detection Stats (TODO)
 ```bash

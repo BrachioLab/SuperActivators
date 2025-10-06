@@ -16,7 +16,7 @@ from utils.default_percentthrumodels import LLAMA_TEXT_PERCENTTHRUMODELS, GEMMA_
 PERCENT_THRU_MODEL = 100  # Default value, can be overridden by command line
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DATASET_NAMES = ['Sarcasm', 'iSarcasm', 'GoEmotions']
-scratch_dir='/scratch/cgoldberg/'
+scratch_dir=''
 
 
 # Model configurations

@@ -286,7 +286,7 @@ def get_activation_distributions_for_concept_samples(
     # Calculate patches per sample and total image samples
     if dataset_name in ['Sarcasm', 'iSarcasm', 'GoEmotions', 'Stanford-Tree-Bank']:
         # For text datasets, we need to load token counts
-        token_file = f"/shared_data0/cgoldberg/Concept_Inversion/Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt"
+        token_file = f"./Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt"
         if os.path.exists(token_file):
             tokens_per_sample = torch.load(token_file)
             total_samples = len(tokens_per_sample)  # Number of text samples
@@ -1254,7 +1254,7 @@ def plot_concept_heatmaps_with_distributions(
     cmap: str = 'hot',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
-    scratch_dir: str = '/scratch/cgoldberg/'
+    scratch_dir: str = ''
 ):
     """
     Plot concept heatmaps with corresponding activation distributions for test samples.
@@ -1602,7 +1602,7 @@ def analyze_image_concept_activations(
     cmap: str = 'hot',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     show_patch_outlines: bool = True,
     n_bins: int = 30
 ) -> plt.Figure:
@@ -2291,7 +2291,7 @@ def analyze_text_concept_activations(
     cmap: str = 'coolwarm',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 30
 ) -> plt.Figure:
     """
@@ -2687,7 +2687,7 @@ def analyze_concept_activations_global(
     save_path: Optional[str] = None,
     figsize_per_row: Tuple[float, float] = (20, 5),
     cmap: str = 'hot',
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 50
 ) -> plt.Figure:
     """
@@ -3297,7 +3297,7 @@ def analyze_concept_std_distributions_global(
     percent_thru_model: int = 100,
     save_path: Optional[str] = None,
     figsize_per_row: Tuple[float, float] = (20, 5),
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 50,
     std_range: Optional[Tuple[float, float]] = None
 ) -> plt.Figure:
@@ -3373,11 +3373,11 @@ def analyze_concept_std_distributions_global(
         # For text datasets, we need to load token counts
         # Try multiple possible locations
         possible_paths = [
-            f"/shared_data0/cgoldberg/Concept_Inversion/Data/{dataset_name}/Embeddings/num_patches_per_sentence_test.pt",
-            f"/scratch/cgoldberg/Data/{dataset_name}/Embeddings/num_patches_per_sentence_test.pt",
+            f"./Data/{dataset_name}/Embeddings/num_patches_per_sentence_test.pt",
+            f"SCRATCH_DIR/Data/{dataset_name}/Embeddings/num_patches_per_sentence_test.pt",
             f"Data/{dataset_name}/Embeddings/num_patches_per_sentence_test.pt",
-            f"/shared_data0/cgoldberg/Concept_Inversion/Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt",
-            f"/scratch/cgoldberg/Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt",
+            f"./Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt",
+            f"SCRATCH_DIR/Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt",
             f"Data/{dataset_name}/Embeddings/num_tokens_per_sentence_test.pt"
         ]
         
@@ -3805,7 +3805,7 @@ def plot_concept_heatmaps_with_distributions_advanced(
     show_image_labels: bool = True,
     show_gt_patches: bool = False,
     gt_patches_per_concept: Optional[Dict] = None,
-    scratch_dir: str = '/scratch/cgoldberg/'
+    scratch_dir: str = ''
 ):
     """
     Advanced version of plot_concept_heatmaps_with_distributions with more options.
@@ -4056,7 +4056,7 @@ def analyze_concept_activation_overlay(
     percent_thru_model: int = 100,
     save_path: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 6),
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 50
 ) -> plt.Figure:
     """
@@ -4884,7 +4884,7 @@ def analyze_gaussian_mixture_for_concepts(
     model_input_size: Optional[Tuple[int, int]] = None,
     percent_thru_model: int = 100,
     n_components: int = 2,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     save_results: bool = False,
     save_path: Optional[str] = None,
     show_threshold: bool = True
@@ -5238,7 +5238,7 @@ def analyze_concept_unified_mixture_decomposition(
     concept_type: str = None,
     model_input_size: Optional[Tuple[int, int]] = None,
     percent_thru_model: int = 100,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 100,
     show_threshold: bool = True,
     background_method: str = 'gaussian',
@@ -6548,7 +6548,7 @@ def analyze_concept_activation_decomposition(
     concept_type: str = None,
     model_input_size: Optional[Tuple[int, int]] = None,
     percent_thru_model: int = 100,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 100,
     show_threshold: bool = True,
     background_method: str = 'gaussian',
@@ -7057,7 +7057,7 @@ def compute_background_thresholds_and_detection(
     n_bootstrap: int = 1000,
     confidence_level: float = 0.95,
     device: str = 'cuda',
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     verbose: bool = True
 ) -> Dict[str, Union[float, Dict[str, float]]]:
     """
@@ -7454,7 +7454,7 @@ def plot_concept_activation_grid(
     concept_type: str,
     model_input_size: Tuple[int, int],
     percentthrumodels: Optional[List[int]] = None,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 50,
     figsize_per_plot: Tuple[float, float] = (4, 3),
     show_thresholds: bool = True,
@@ -7949,7 +7949,7 @@ def compute_concept_activation_distributions(
     concept_type: str,
     model_input_size: Tuple[int, int],
     percentthrumodels: Optional[List[int]] = None,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     n_bins: int = 50,
     compute_thresholds: bool = True,
     max_concepts: int = 10,
@@ -8573,7 +8573,7 @@ def compute_separation_over_percentthru(
     concept_type: str,
     model_input_size: Tuple[int, int],
     metrics_to_compute: List[str] = ['separability', 'auc_roc'],
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     percentthrumodels: Optional[List[int]] = None,
     concepts: Optional[List[str]] = None,
     n_bins: int = 50,
@@ -10319,7 +10319,7 @@ def plot_single_sample_activation_distribution(
     model_name: str,
     concept_type: str = "avg_patch_embeddings",
     percentthrumodel: int = 100,
-    scratch_dir: str = "/scratch/cgoldberg",
+    scratch_dir: str = "",
     model_input_size: Union[int, Tuple[int, int]] = (224, 224),
     figsize: Optional[Tuple[float, float]] = None,
     fontsize: Optional[int] = None,
@@ -11761,7 +11761,7 @@ def compute_overlap_across_layers(
     figsize: Tuple[int, int] = (12, 8),
     colors: Optional[Dict[str, str]] = None,
     linestyles: Optional[Dict[str, str]] = None,
-    scratch_dir: str = '/scratch/cgoldberg/'
+    scratch_dir: str = ''
 ) -> Dict:
     """
     Compute and plot probability mass overlap across layers for multiple datasets and models.
@@ -11777,7 +11777,7 @@ def compute_overlap_across_layers(
         figsize: Figure size tuple
         colors: Dict mapping dataset names to colors (optional)
         linestyles: Dict mapping concept types to line styles (optional)
-        scratch_dir: Directory containing activation files (default: '/scratch/cgoldberg/')
+        scratch_dir: Directory containing activation files (default: '')
         
     Returns:
         Dict containing overlap results for each configuration
@@ -12250,7 +12250,7 @@ def compute_overlap_across_layers_data_old(
     concept_types: List[str] = ['avg', 'linsep'],
     sample_type: str = 'patch',
     percentthrus: Optional[List[int]] = None,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     background_percentile: float = 0.99,
     validation_split: str = 'cal'
 ) -> Dict:
@@ -12263,7 +12263,7 @@ def compute_overlap_across_layers_data_old(
         concept_types: List of concept types to analyze (default: ['avg', 'linsep'])
         sample_type: Type of samples ('patch' or 'cls') - use 'patch' for patch/token-level analysis
         percentthrus: List of percentthru values to analyze (default: model-specific)
-        scratch_dir: Directory containing activation files (default: '/scratch/cgoldberg/')
+        scratch_dir: Directory containing activation files (default: '')
         background_percentile: Percentile of background distribution to use as threshold (default: 0.99 = 99%)
         validation_split: Split to use for computing background thresholds (default: 'cal')
         
@@ -12831,7 +12831,7 @@ def compute_background_detection_across_layers_data(
     concept_types: List[str] = ['avg', 'linsep'],
     sample_type: str = 'patch',
     percentthrus: Optional[List[int]] = None,
-    scratch_dir: str = '/scratch/cgoldberg/',
+    scratch_dir: str = '',
     background_percentile: float = 0.995,
     validation_split: str = 'cal',
     max_background_samples: int = 100000
@@ -12848,7 +12848,7 @@ def compute_background_detection_across_layers_data(
         concept_types: List of concept types to analyze (default: ['avg', 'linsep'])
         sample_type: Type of samples ('patch' or 'cls') - use 'patch' for patch/token-level analysis
         percentthrus: List of percentthru values to analyze (default: model-specific)
-        scratch_dir: Directory containing activation files (default: '/scratch/cgoldberg/')
+        scratch_dir: Directory containing activation files (default: '')
         background_percentile: Percentile of background distribution to use as threshold (default: 0.995 = 99.5%)
         validation_split: Split to use for computing background thresholds (default: 'cal')
         max_background_samples: Maximum number of background samples to use for threshold computation

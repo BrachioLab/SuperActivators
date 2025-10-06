@@ -16,7 +16,7 @@ from utils.default_percentthrumodels import CLIP_PERCENTTHRUMODELS, LLAMA_VISION
 PERCENT_THRU_MODEL = 100  # Default value, can be overridden by command line
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DATASET_NAMES = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces']
-scratch_dir='/scratch/cgoldberg/' 
+scratch_dir='' 
 
 
 #for clip

@@ -36,6 +36,7 @@ MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text'
 DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Sarcasm', 'iSarcasm', 'GoEmotions']
 SAMPLE_TYPES = [('patch', 1000), ('cls', 50)]
 CONCEPT_TYPES = ['avg', 'linsep', 'kmeans', 'linsep_kmeans']
+SCRATCH_DIR = ''
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PERCENT_THRU_MODEL = 100
@@ -117,7 +118,7 @@ def main(dataset_name, model_name, concept_type, mode='without', percent_thru_mo
     
     # Load activation loader
     print(f"Loading activations from: {acts_file}")
-    scratch_dir = '/scratch/cgoldberg/'
+    scratch_dir = SCRATCH_DIR
     
     # ChunkedActivationLoader automatically determines the correct directory based on filename
     # Files with 'dists_' or 'linsep' -> Distances/, others -> Cosine_Similarities/

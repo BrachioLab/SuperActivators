@@ -355,7 +355,7 @@ def map_concepts_to_patch_indices(dataset_name, model_input_size, patch_size=14)
 #                     text_samples,
 #                     add_special_tokens=False,
 #                     padding=True,
-#                     token='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',
+#                     token=os.environ.get("HF_TOKEN"),
 #                     return_tensors="pt"
 #                 )
 
@@ -401,7 +401,7 @@ def map_concepts_to_patch_indices(dataset_name, model_input_size, patch_size=14)
 #                     text_samples,
 #                     add_special_tokens=False,
 #                     padding=False,
-#                     token='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',
+#                     token=os.environ.get("HF_TOKEN"),
 #                     return_tensors="pt"
 #                 )
 

@@ -10,7 +10,7 @@ import glob
 def summarize_kept_units():
     """Find and summarize all unit mapping files"""
     
-    filtered_dir = '/scratch/cgoldberg/SAE_Activations_Filtered'
+    filtered_dir = 'SCRATCH_DIR/SAE_Activations_Filtered'
     
     print("SAE Unit Pruning Summary")
     print("=" * 80)

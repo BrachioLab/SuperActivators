@@ -11,8 +11,8 @@ from collections import defaultdict
 from sklearn.metrics import auc
 import sys
 sys.path.append(os.path.abspath(".."))
-if os.path.exists('/shared_data0/cgoldberg/Concept_Inversion/Experiments'):
-    os.chdir('/shared_data0/cgoldberg/Concept_Inversion/Experiments')
+if os.path.exists('./Experiments'):
+    os.chdir('./Experiments')
 else:
     os.chdir('/workspace/Experiments')
 
@@ -449,8 +449,8 @@ def get_per_concept_prompt_scores(dataset_name, model_name, metric, split='test'
         dict: A dictionary mapping concept to its score.
     """
     # Use relative path that works in both environments
-    if os.path.exists('/shared_data0/cgoldberg/Concept_Inversion/Experiments'):
-        prompt_results_dir = f'/shared_data0/cgoldberg/Concept_Inversion/Experiments/prompt_results/{dataset_name}'
+    if os.path.exists('./Experiments'):
+        prompt_results_dir = f'./Experiments/prompt_results/{dataset_name}'
     else:
         prompt_results_dir = f'/workspace/Experiments/prompt_results/{dataset_name}'
     csv_files = [f for f in os.listdir(prompt_results_dir) if f.endswith('_f1_scores.csv') and dataset_name in f]

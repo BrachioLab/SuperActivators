@@ -19,7 +19,7 @@ from utils.general_utils import get_split_df
 
 # Configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SCRATCH_DIR = '/scratch/cgoldberg/'
+SCRATCH_DIR = ''
 
 # Default pruning parameters
 CLIP_PRUNING_CONFIG = {

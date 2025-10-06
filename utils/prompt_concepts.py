@@ -1,4 +1,5 @@
 import base64
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -68,10 +69,10 @@ class OurLLM:
                 model_name,
                 torch_dtype="auto",
                 device_map="auto",
-                token="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",
+                token=os.environ.get("HF_TOKEN"),
             )
             self.processor = AutoProcessor.from_pretrained(
-                model_name, token="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"
+                model_name, token=os.environ.get("HF_TOKEN")
             )
         elif "QVQ" in model_name:
             self.model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -79,10 +80,10 @@ class OurLLM:
                 torch_dtype="auto",
                 device_map="auto",
                 attn_implementation="flash_attention_2",
-                token="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",
+                token=os.environ.get("HF_TOKEN"),
             )
             self.processor = AutoProcessor.from_pretrained(
-                model_name, token="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"
+                model_name, token=os.environ.get("HF_TOKEN")
             )
         elif "Qwen" in model_name:
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -90,10 +91,10 @@ class OurLLM:
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
                 attn_implementation="flash_attention_2",
-                token="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",
+                token=os.environ.get("HF_TOKEN"),
             )
             self.processor = AutoProcessor.from_pretrained(
-                model_name, token="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"
+                model_name, token=os.environ.get("HF_TOKEN")
             )
         elif "OpenGVLab/InternVL2_5-78B-MPO" in model_name:
             self.model = AutoModel.from_pretrained(
@@ -101,11 +102,11 @@ class OurLLM:
                 torch_dtype="auto",
                 device_map="auto",
                 attn_implementation="flash_attention_2",
-                token="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",
+                token=os.environ.get("HF_TOKEN"),
                 trust_remote_code=True,
             )
             self.processor = AutoProcessor.from_pretrained(
-                model_name, token="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", trust_remote_code=True
+                model_name, token=os.environ.get("HF_TOKEN"), trust_remote_code=True
             )
 
     def chat(self, prompt, sampling_params, use_tqdm):
@@ -165,12 +166,12 @@ class APIModel:
         self.model_name = model_name
         if "gemini" in model_name:
             self.client = OpenAI(
-                api_key="AIzaSyCOrvkazwRNhQFyKMgHjID9HxGjRWWz1OQ",
+                api_key=os.environ.get("GEMINI_API_KEY", ""),
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             )
         else:
             self.client = OpenAI(
-                api_key="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"
+                api_key=os.environ.get("OPENAI_API_KEY", "")
             )
 
     def chat(self, prompt, sampling_params, use_tqdm):

@@ -32,10 +32,10 @@ from utils.default_percentthrumodels import (
 
 # Pipeline stage locations
 STAGE_LOCATIONS = {
-    'embeddings': '/scratch/cgoldberg/Embeddings',
+    'embeddings': 'SCRATCH_DIR/Embeddings',
     'concepts': '/workspace/Experiments/Concepts',
-    'cosine_similarities': '/scratch/cgoldberg/Cosine_Similarities',
-    'distances': '/scratch/cgoldberg/Distances',
+    'cosine_similarities': 'SCRATCH_DIR/Cosine_Similarities',
+    'distances': 'SCRATCH_DIR/Distances',
     'thresholds': '/workspace/Experiments/Thresholds',
     'detection': '/workspace/Experiments/Quant_Results',
     'inversion': '/workspace/Experiments/Quant_Results',

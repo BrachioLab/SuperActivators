@@ -30,7 +30,7 @@ actual_percent = layer_to_percent(21, 24, zero_indexed=True, model_name="CLIP-SA
 print(f"Using PERCENT_THRU_MODEL = {PERCENT_THRU_MODEL}% (should be ~{actual_percent:.1f}%)\n")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_DATASET_NAMES = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces']
-SCRATCH_DIR = '/scratch/cgoldberg/'
+SCRATCH_DIR = ''
 
 # SAE-specific configuration
 MODEL_NAME = "ViT-L-14"

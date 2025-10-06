@@ -19,7 +19,7 @@ from utils.memory_management_utils import ChunkedEmbeddingLoader
 
 # Configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SCRATCH_DIR = '/scratch/cgoldberg/'
+SCRATCH_DIR = ''
 
 # Default datasets
 IMAGE_DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces']

@@ -34,7 +34,7 @@ SAMPLE_TYPES = [('patch', 1000), ('cls', 50)]
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PERCENT_THRU_MODEL = 100  # Default value, can be overridden by command line
-SCRATCH_DIR = '/scratch/cgoldberg/'
+SCRATCH_DIR = ''
 BATCH_SIZE = 1000  # Increased from 500 for better GPU utilization
 PRELOAD_ALL_CHUNKS = True  # Load all chunks into memory for faster training
 

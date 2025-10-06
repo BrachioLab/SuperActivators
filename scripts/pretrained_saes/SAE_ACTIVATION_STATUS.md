@@ -64,7 +64,7 @@ python compute_activations_sae.py --datasets CLEVR Coco --sample-type patch
 ```
 
 ## Output Location
-All SAE activations are saved to: `/scratch/cgoldberg/SAE_Activations/{dataset_name}/`
+All SAE activations are saved to: `SCRATCH_DIR/SAE_Activations/{dataset_name}/`
 
 ## Next Steps
 1. Complete processing remaining datasets
