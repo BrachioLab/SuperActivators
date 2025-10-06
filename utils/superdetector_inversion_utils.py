@@ -26,14 +26,15 @@ from utils.patch_alignment_utils import (
     get_patch_range_for_image, get_patch_range_for_text, 
     compute_patches_per_image, filter_patches_by_image_presence as filter_patches_utils
 )
-from utils.quant_concept_evals_utils_loader import detect_then_invert_metrics_over_percentiles as loader_compatible_fn
+from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles as loader_compatible_fn
 from utils.quant_concept_evals_utils import create_binary_labels, compute_stats_from_counts
 
 # Visualization functions (keep these as they don't handle data loading)
-from utils.superdetector_inversion_utils_original import (
-    draw_superdetectors_on_image,
-    find_superdetector_patches  # Keep for single-image analysis
-)
+# TODO: These functions were moved or removed - commenting out for now
+# from utils.superdetector_inversion_utils_original import (
+#     draw_superdetectors_on_image,
+#     find_superdetector_patches  # Keep for single-image analysis
+# )
 
 # NOTE: We work directly with tensors and don't use TensorConceptActivations wrapper
 # to avoid redundancy with memory_management_utils
@@ -118,16 +119,24 @@ def find_all_superdetector_patches(percentile: float,
     
     # Batch load activations for all concepts
     if isinstance(act_loader, MatchedConceptActivationLoader):
-        # Load all concepts at once for the needed range
-        batch_acts = act_loader.load_concept_range(concepts_to_process, min_idx, max_idx)
+        # Load tensor range for all matched concepts
+        range_tensor = act_loader.load_tensor_range(min_idx, max_idx)
+        
+        # Get concept to column index mapping
+        concept_to_col_idx = {concept: i for i, concept in enumerate(act_loader.concept_names)}
         
         # Process each concept
         for concept in concepts_to_process:
+            if concept not in concept_to_col_idx:
+                all_superdetectors[concept] = []
+                continue
+                
+            concept_col_idx = concept_to_col_idx[concept]
             concept_patch_indices = concept_patch_map[concept]
             relative_indices = [idx - min_idx for idx in concept_patch_indices]
             
             # Extract activations for this concept's patches
-            concept_activations = torch.tensor(batch_acts[concept].iloc[relative_indices].values, device=device)
+            concept_activations = range_tensor[relative_indices, concept_col_idx].to(device)
             
             # Find top percentile patches
             threshold = torch.quantile(concept_activations, 1 - percentile)
@@ -256,7 +265,7 @@ def batch_superdetector_inversions(
         # For global superdetectors, fall back to original implementation
         for percentile in percentiles:
             batch_superdetector_inversions(
-                percentile, agglomerate_type, embedding_loader, act_loader,
+                [percentile], agglomerate_type, embedding_loader, act_loader,
                 concept_names, gt_samples_per_concept_test, dataset_name,
                 model_input_size, con_label, device, patch_size, local, split
             )
@@ -271,14 +280,14 @@ def batch_superdetector_inversions(
     best_detection_percentiles = torch.load(best_detection_file, weights_only=False)
     
     detection_thresholds = {}
-    if 'kmeans' not in con_label:
+    if 'kmeans' not in con_label and 'sae' not in con_label:
         all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
         for concept, info in best_detection_percentiles.items():
             if concept in concept_names:
                 best_perc = info['best_percentile']
                 detection_thresholds[concept] = all_thresholds[best_perc][concept][0] if isinstance(all_thresholds[best_perc][concept], tuple) else all_thresholds[best_perc][concept]
     else:
-        # Handle kmeans thresholds
+        # Handle kmeans and SAE thresholds (unsupervised methods)
         raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
         
@@ -355,6 +364,7 @@ def batch_superdetector_inversions(
         # Use unified method to find indices above threshold
         super_indices = act_loader.find_indices_above_threshold(concept, threshold)
         
+        
         if len(super_indices) > 0:
             # Load embeddings for superdetector patches
             super_embeds = embedding_loader.load_specific_embeddings(super_indices).to(device)
@@ -374,6 +384,12 @@ def batch_superdetector_inversions(
                 raise ValueError(f"Unknown agglomerate type: {agglomerate_type}")
             
             superdetector_vectors[concept_idx] = F.normalize(superdetector_vec.unsqueeze(0), dim=1)
+            
+            # Clean up memory after each concept
+            del super_embeds, super_acts
+            if 'weights' in locals():
+                del weights
+            torch.cuda.empty_cache()
         else:
             print(f"Warning: No superdetector patches found for {concept}")
     
@@ -447,11 +463,13 @@ def batch_superdetector_inversions(
         min_global = min(all_global_patches)
         max_global = max(all_global_patches) + 1
         
+        
         if isinstance(act_loader, MatchedConceptActivationLoader):
             # Load tensor range for all concepts
             # First load the underlying tensor data
             underlying_loader = act_loader.activation_loader
-            batch_acts_tensor = underlying_loader.load_tensor_range(min_global, max_global).to(device)
+            # Load to CPU first to avoid GPU OOM
+            batch_acts_tensor = underlying_loader.load_tensor_range(min_global, max_global)
             
             # Create dictionary mapping concept names to their activations
             batch_acts_dict = {}
@@ -461,7 +479,8 @@ def batch_superdetector_inversions(
                 if cluster_id and cluster_id in underlying_loader.columns:
                     # Get column index for this cluster
                     col_idx = underlying_loader.columns.index(cluster_id)
-                    batch_acts_dict[concept_name] = batch_acts_tensor[:, col_idx]
+                    # Only move the specific column to GPU when needed
+                    batch_acts_dict[concept_name] = batch_acts_tensor[:, col_idx].to(device)
         else:
             # Load tensor range
             batch_acts_tensor = act_loader.load_tensor_range(min_global, max_global)
@@ -476,13 +495,20 @@ def batch_superdetector_inversions(
                 continue
             
             # Load embeddings only for this image's patches
-            img_embeds = embedding_loader.load_specific_embeddings(global_patches).to(device)
-            img_embeds_norm = F.normalize(img_embeds, dim=1)
+            # For SAE, process on CPU if many patches to avoid GPU OOM
+            if 'sae' in con_label and n_patches > 100:
+                img_embeds = embedding_loader.load_specific_embeddings(global_patches).to('cpu')
+                img_embeds_norm = F.normalize(img_embeds, dim=1)
+                compute_device = 'cpu'
+            else:
+                img_embeds = embedding_loader.load_specific_embeddings(global_patches).to(device)
+                img_embeds_norm = F.normalize(img_embeds, dim=1)
+                compute_device = device
             
             # Compute similarities with all superdetector vectors at once
             if len(superdetector_vectors) > 0:
                 # Stack all superdetector vectors
-                super_vecs = torch.cat([vec for vec in superdetector_vectors.values()], dim=0)
+                super_vecs = torch.cat([vec.to(compute_device) for vec in superdetector_vectors.values()], dim=0)
                 concept_indices = list(superdetector_vectors.keys())
                 
                 # Compute all similarities at once [n_patches x n_concepts]
@@ -506,6 +532,9 @@ def batch_superdetector_inversions(
             del batch_acts_dict
         if 'batch_acts_tensor' in locals():
             del batch_acts_tensor
+        # Also clean up the superdetector vectors if they exist
+        if 'super_vecs' in locals():
+            del super_vecs
         torch.cuda.empty_cache()
     
     # Verify we processed all cal/test patches
@@ -678,6 +707,20 @@ def all_superdetector_inversions_across_percentiles(percentiles: List[float],
     Now uses optimized batch processing.
     """
     # Process all percentiles at once
+    # Adjust batch size based on concept type - kmeans with many clusters needs smaller batches
+    if 'sae' in con_label:
+        batch_size = 5  # Very small batch for SAE due to large number of patches
+    elif 'kmeans_1000' in con_label:
+        batch_size = 100  # Increased from 10 for faster processing
+    elif 'kmeans' in con_label:
+        batch_size = 20  # Moderate batch for other kmeans
+    else:
+        batch_size = 50  # Larger batch for avg/linsep with fewer concepts
+    
+    # Debug info about embedding dimensions
+    embed_info = embedding_loader.get_embedding_info()
+    print(f"\nEmbedding info: {embed_info['embedding_dim']} dimensions, {embed_info['total_samples']} samples")
+    
     batch_superdetector_inversions(
         percentiles=percentiles,
         agglomerate_type=agglomerate_type,
@@ -692,7 +735,7 @@ def all_superdetector_inversions_across_percentiles(percentiles: List[float],
         patch_size=patch_size,
         local=local,
         split=split,
-        batch_size=50,  # Adjust based on GPU memory
+        batch_size=batch_size,  # Dynamic based on concept type
         scratch_dir=scratch_dir
     )
 
@@ -712,7 +755,8 @@ def detect_then_invert_superdetector_twostage_metrics(
     all_object_patches: Optional[set] = None,
     patch_size: int = 14,
     agglomerate_type: str = 'avg',
-    split: str = 'cal'
+    split: str = 'cal',
+    scratch_dir: str = '/scratch/cgoldberg/'
 ):
     """
     Two-stage superdetector method:
@@ -793,14 +837,14 @@ def detect_then_invert_superdetector_twostage_metrics(
     
     # Load detection thresholds
     detection_thresholds = {}
-    if 'kmeans' not in con_label:
+    if 'kmeans' not in con_label and 'sae' not in con_label:
         all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
         for concept, info in best_detection_percentiles.items():
             if concept in concepts:
                 best_perc = info['best_percentile']
                 detection_thresholds[concept] = all_thresholds[best_perc][concept][0] if isinstance(all_thresholds[best_perc][concept], tuple) else all_thresholds[best_perc][concept]
     else:
-        # Handle kmeans thresholds
+        # Handle kmeans and SAE thresholds (unsupervised methods)
         raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
         
@@ -813,8 +857,6 @@ def detect_then_invert_superdetector_twostage_metrics(
                     detection_thresholds[concept] = raw_thresholds[best_perc][key][0] if isinstance(raw_thresholds[best_perc][key], tuple) else raw_thresholds[best_perc][key]
     
     # Load superdetector inversion similarities using ChunkedActivationLoader
-    # Need to get scratch_dir from somewhere - let's use the standard one
-    scratch_dir = '/scratch/cgoldberg/'  # This should match what's used in the pipeline
     inversion_file = f'superpatch_{agglomerate_type}_inv_{con_label}_chunks_info.json'
     inversion_path = os.path.join(scratch_dir, 'Superpatches', dataset_name, inversion_file)
     
@@ -1153,7 +1195,8 @@ def detect_then_invert_twostage_superdetector_with_optimal_thresholds(
     agglomerate_type: str = 'avg',
     all_object_patches: Optional[set] = None,
     patch_size: int = 14,
-    split: str = 'test'
+    split: str = 'test',
+    scratch_dir: str = '/scratch/cgoldberg/'
 ):
     """
     Evaluate two-stage superdetector method on test set using optimal thresholds.
@@ -1475,13 +1518,13 @@ def detect_then_invert_locally_with_optimal_thresholds(act_loader: Union[Chunked
     
     # Get detection thresholds for each concept
     detection_thresholds = {}
-    if 'kmeans' not in con_label:
+    if 'kmeans' not in con_label and 'sae' not in con_label:
         all_detect_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
         for concept, info in best_detection_percentiles.items():
             best_perc = info['best_percentile']
             detection_thresholds[concept] = all_detect_thresholds[best_perc][concept][0] if isinstance(all_detect_thresholds[best_perc][concept], tuple) else all_detect_thresholds[best_perc][concept]
     else:
-        # Handle kmeans thresholds
+        # Handle kmeans and SAE thresholds (unsupervised methods)
         raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
         
@@ -1524,7 +1567,6 @@ def detect_then_invert_locally_with_optimal_thresholds(act_loader: Union[Chunked
         concepts_by_percentile[best_inv_perc].append(concept)
     
     # Load inversions using ChunkedActivationLoader if available
-    scratch_dir = '/scratch/cgoldberg/'  # This should match what's used in the pipeline
     inversion_file = f'superpatch_{agglomerate_type}_inv_{con_label}_chunks_info.json'
     inversion_path = os.path.join(scratch_dir, 'Superpatches', dataset_name, inversion_file)
     

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,16 +10,94 @@ from tqdm import tqdm
 from vllm import LLM
 
 import sys
-sys.path.append('/shared_data0/cgoldberg/Concept_Inversion/Experiments')
-from src.datasets import ImageDataset
+sys.path.append('/workspace/Experiments')
+# from src.datasets import ImageDataset  # Not used - using FixedImageDataset instead
 from src.inversion_methods import prompt_inversion
 from src.prompt_concepts import LLMNet, RawInput
 from utils.quant_concept_evals_utils import compute_concept_thresholds
 
 
+class FixedImageDataset:
+    """Fixed version of ImageDataset that works with absolute paths"""
+    def __init__(self, root, dataset_name, split="test", transform=None):
+        self.root = root
+        self.dataset_name = dataset_name
+        self.transform = transform
+        self.split = split
+
+        # Load metadata to get concept information
+        self.metadata = pd.read_csv(f"/workspace/Data/{dataset_name}/metadata.csv")
+
+        # Select images based on the split
+        if split == "train":
+            self.metadata = self.metadata[self.metadata["split"] == "train"].reset_index(drop=True)
+        elif split == "test":
+            self.metadata = self.metadata[self.metadata["split"] == "test"].reset_index(drop=True)
+
+        # Define specific concepts for each dataset
+        if dataset_name == 'Coco':
+            target_concepts = ['bed', 'surfboard', 'bicycle', 'spoon', 'pizza', 'fork', 'train', 'motorcycle', 'tennis racket', 'sports ball', 'potted plant', 'umbrella', 'dog', 'knife', 'laptop', 'cat', 'sink', 'bus', 'traffic light', 'couch', 'clock', 'tv', 'cell phone', 'backpack', 'book', 'bench', 'truck', 'handbag', 'bowl', 'appliance', 'bottle', 'cup', 'dining table', 'car', 'outdoor', 'chair', 'electronic', 'indoor', 'food', 'accessory', 'kitchen', 'sports', 'animal', 'vehicle', 'furniture', 'person']
+        elif dataset_name == 'Broden-Pascal':
+            target_concepts = ['color::black-c', 'color::blue-c', 'color::brown-c', 'color::green-c', 'color::grey-c', 'color::orange-c', 'color::pink-c', 'color::purple-c', 'color::red-c', 'color::white-c', 'color::yellow-c', 'object::airplane', 'object::bicycle', 'object::bird', 'object::boat', 'object::body', 'object::book', 'object::building', 'object::bus', 'object::cap', 'object::car', 'object::cat', 'object::cup', 'object::dog', 'object::door', 'object::ear', 'object::engine', 'object::grass', 'object::hair', 'object::horse', 'object::leg', 'object::mirror', 'object::motorbike', 'object::mountain', 'object::painting', 'object::person', 'object::pottedplant', 'object::saddle', 'object::screen', 'object::sky', 'object::sofa', 'object::table', 'object::track', 'object::train', 'object::tvmonitor', 'object::wheel', 'object::wood', 'part::arm', 'part::bag', 'part::beak', 'part::bottle', 'part::box', 'part::cabinet', 'part::ceiling', 'part::chain wheel', 'part::chair', 'part::coach', 'part::curtain', 'part::eye', 'part::eyebrow', 'part::fabric', 'part::fence', 'part::floor', 'part::foot', 'part::ground', 'part::hand', 'part::handle bar', 'part::head', 'part::headlight', 'part::light', 'part::mouth', 'part::muzzle', 'part::neck', 'part::nose', 'part::paw', 'part::plant', 'part::plate', 'part::plaything', 'part::pole', 'part::pot', 'part::road', 'part::rock', 'part::rope', 'part::shelves', 'part::sidewalk', 'part::signboard', 'part::stern', 'part::tail', 'part::torso', 'part::tree', 'part::wall', 'part::water', 'part::windowpane', 'part::wing']
+        elif dataset_name == 'Broden-OpenSurfaces':
+            target_concepts = ['color::black-c', 'color::blue-c', 'color::brown-c', 'color::green-c', 'color::grey-c', 'color::orange-c', 'color::pink-c', 'color::purple-c', 'color::red-c', 'color::white-c', 'color::yellow-c', 'material::brick', 'material::cardboard', 'material::carpet', 'material::ceramic', 'material::concrete', 'material::fabric', 'material::food', 'material::fur', 'material::glass', 'material::granite', 'material::hair', 'material::laminate', 'material::leather', 'material::metal', 'material::mirror', 'material::painted', 'material::paper', 'material::plastic-clear', 'material::plastic-opaque', 'material::rock', 'material::rubber', 'material::skin', 'material::tile', 'material::wallpaper', 'material::wicker', 'material::wood']
+        elif dataset_name == 'CLEVR':
+            target_concepts = ['color::blue', 'color::green', 'color::red', 'shape::cube', 'shape::cylinder', 'shape::sphere']
+        elif dataset_name == 'Sarcasm':
+            target_concepts = ['sarcasm']
+        elif dataset_name == 'iSarcasm':
+            target_concepts = ['sarcasm', 'irony', 'satire', 'understatement', 'overstatement', 'rhetorical_question', 'sarcastic']
+        elif dataset_name == 'GoEmotions':
+            target_concepts = ['admiration', 'amusement', 'anger', 'annoyance', 'approval', 'caring', 'confusion', 'curiosity', 'disappointment', 'disapproval', 'disgust', 'excitement', 'gratitude', 'joy', 'love', 'optimism', 'realization', 'sadness', 'surprise']
+        else:
+            # Fallback to all concepts if dataset not recognized
+            target_concepts = [col for col in self.metadata.columns if col not in ["image_path", "split", "class", "text_path"]]
+        
+        # Filter to only target concepts that exist in metadata
+        self.concept_columns = [col for col in target_concepts if col in self.metadata.columns]
+
+    def __len__(self):
+        """Return the total number of images in the dataset."""
+        return len(self.metadata)
+
+    def __getitem__(self, idx):
+        """
+        Get an image/text and its metadata by index.
+        """
+        # Check if this is a text dataset
+        if 'text_path' in self.metadata.columns:
+            # Load text
+            text_path = f"/workspace/Data/{self.dataset_name}/{self.metadata.iloc[idx]['text_path']}"
+            with open(text_path, 'r', encoding='utf-8') as f:
+                text = f.read().strip()
+            data = text
+        else:
+            # Load image
+            from PIL import Image
+            image_path = f"/workspace/Data/{self.dataset_name}/{self.metadata.iloc[idx]['image_path']}"
+            image = Image.open(image_path).convert("RGB")
+            
+            # Apply transforms if available
+            if self.transform:
+                image = self.transform(image)
+            data = image
+
+        # Get concepts as a tensor
+        concepts = (self.metadata.loc[idx, self.concept_columns].values,)
+        
+        return data, concepts
+
+    def get_concept_names(self):
+        """Return list of concept names"""
+        return self.concept_columns
+
+
 def concept_inversion(args):
+    # Create prompt_results directory if it doesn't exist
+    prompt_results_dir = os.path.join(args.output_dir, "prompt_results")
+    os.makedirs(prompt_results_dir, exist_ok=True)
+    
     # load model
-    # model = OurLLM(model_name=args.model)
     model = LLM(
         model=args.model,
         max_model_len=12288,
@@ -26,12 +105,12 @@ def concept_inversion(args):
         max_num_seqs=1,
         enforce_eager=True if "llama" in args.model.lower() else False,
         trust_remote_code=True,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.9,
     )
 
     # load dataset
-    data = ImageDataset(
-        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+    data = FixedImageDataset(
+        root="/workspace", dataset_name=args.dataset, split="test"
     )
     concept_names = data.get_concept_names()
 
@@ -39,7 +118,7 @@ def concept_inversion(args):
         concept_names.remove("class")
 
     # load detected concepts
-    concepts_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
+    concepts_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
     with open(concepts_file, mode="r") as file:
         reader = csv.reader(file)
         next(reader)  # Skip header
@@ -62,7 +141,7 @@ def concept_inversion(args):
         inversion_results.append(concept_inversion)
 
     # Save inversion results to a file
-    output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
+    output_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
     with open(output_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Image Index"] + concept_names)
@@ -77,8 +156,11 @@ def concept_inversion(args):
 
 
 def main(args):
+    # Create prompt_results directory if it doesn't exist
+    prompt_results_dir = os.path.join(args.output_dir, "prompt_results", args.dataset)
+    os.makedirs(prompt_results_dir, exist_ok=True)
+    
     # load model
-    # model = OurLLM(model_name=args.model)
     model = LLM(
         model=args.model,
         max_model_len=12288,
@@ -86,12 +168,12 @@ def main(args):
         max_num_seqs=1,
         enforce_eager=True if "llama" in args.model.lower() else False,
         trust_remote_code=True,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.9,
     )
 
     # load dataset
-    data = ImageDataset(
-        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+    data = FixedImageDataset(
+        root="/workspace", dataset_name=args.dataset, split="test"
     )
     concept_names = data.get_concept_names()
 
@@ -100,33 +182,41 @@ def main(args):
 
     concept_extractors = []
     print("Concepts:", concept_names)
+    
+    # Check if this is a text dataset
+    is_text_dataset = 'text_path' in data.metadata.columns
+    
     for concept in concept_names:
-        extractor = LLMNet(
-            model,
-            input_desc=f"an image which may contain concepts from the list {concept_names}",
-            output_desc=f"the word 'Yes' if the image contains {concept}, otherwise 'No'",
-            image_before_prompt=True,
-        )
+        if is_text_dataset:
+            extractor = LLMNet(
+                model,
+                input_desc=f"a text passage which may contain concepts from the list {concept_names}",
+                output_desc=f"the word 'Yes' if the text contains {concept}, otherwise 'No'",
+                image_before_prompt=False,
+            )
+        else:
+            extractor = LLMNet(
+                model,
+                input_desc=f"an image which may contain concepts from the list {concept_names}",
+                output_desc=f"the word 'Yes' if the image contains {concept}, otherwise 'No'",
+                image_before_prompt=True,
+            )
         concept_extractors.append(extractor)
-    # for concept in concept_names:
-    #     extractor = LLMNet(
-    #         model,
-    #         input_desc="an image",
-    #         output_desc=f"a list (in the format [concept1, concept2, ...]) of the concepts that are present in the image out of the following: {concept_names}",
-    #         image_before_prompt=True
-    #     )
-    #     concept_extractors.append(extractor)
 
     extracted_concepts = []
     inversion_results = []
     for i in tqdm(range(len(data))):
-        image, _ = data[i]
+        data_item, _ = data[i]
 
         # extract concepts
         concept_outputs = []
         concept_inversion = {}
         for j, extractor in enumerate(concept_extractors):
-            output = extractor.forward(RawInput(image_input=image, text_input=None))
+            if is_text_dataset:
+                output = extractor.forward(RawInput(image_input=None, text_input=data_item))
+            else:
+                output = extractor.forward(RawInput(image_input=data_item, text_input=None))
+            
             if "Yes" in output:
                 output = 1
             else:
@@ -135,7 +225,10 @@ def main(args):
 
             # get inversion if concept present
             if output == 1:
-                inversion = prompt_inversion(model, concept_names[j], image)
+                if is_text_dataset:
+                    inversion = prompt_inversion(model, concept_names[j], data_item, is_text=True)
+                else:
+                    inversion = prompt_inversion(model, concept_names[j], data_item)
                 print("Inversion:", inversion)
                 concept_inversion[concept_names[j]] = inversion
         inversion_results.append(concept_inversion)
@@ -144,7 +237,7 @@ def main(args):
         extracted_concepts.append(concept_outputs)
 
     # Save extracted concepts to a file
-    output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
+    output_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
     with open(output_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Image Index"] + concept_names)
@@ -152,7 +245,7 @@ def main(args):
             writer.writerow([idx] + concepts)
 
     # Save inversion results to a file
-    output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
+    output_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_inversion.txt"
     with open(output_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Image Index"] + concept_names)
@@ -167,9 +260,13 @@ def main(args):
 
 
 def eval(args):
+    # Create prompt_results directory if it doesn't exist
+    prompt_results_dir = os.path.join(args.output_dir, "prompt_results", args.dataset)
+    os.makedirs(prompt_results_dir, exist_ok=True)
+    
     # load dataset
-    data = ImageDataset(
-        root="/shared_data0/cgoldberg/Concept_Inversion/", dataset_name=args.dataset, split="test"
+    data = FixedImageDataset(
+        root="/workspace", dataset_name=args.dataset, split="test"
     )
     concept_names = data.get_concept_names()
 
@@ -187,7 +284,7 @@ def eval(args):
         concept_names.remove("class")
 
     # Load extracted concepts from the file
-    output_file = f"{args.output_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
+    output_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_concepts.txt"
     with open(output_file, mode="r") as file:
         reader = csv.reader(file)
         next(reader)  # Skip header
@@ -196,35 +293,76 @@ def eval(args):
     extracted_concepts_array = np.array(extracted_concepts)
 
     # Evaluate the extracted concepts
+    f1_results = []
     for idx, concepts in enumerate(concept_names):
         gt = gt_labels_array[:, idx]
         pred = extracted_concepts_array[:, idx]
-        # Calculate F1 score
+        
+        # Calculate confusion matrix components
         tp = np.sum((gt == 1) & (pred == 1))
         fp = np.sum((gt == 0) & (pred == 1))
         fn = np.sum((gt == 1) & (pred == 0))
+        tn = np.sum((gt == 0) & (pred == 0))
+        
+        # Calculate rates
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # False Positive Rate
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0  # True Positive Rate (Recall)
+        fnr = fn / (fn + tp) if (fn + tp) > 0 else 0  # False Negative Rate
+        tnr = tn / (tn + fp) if (tn + fp) > 0 else 0  # True Negative Rate (Specificity)
+        
+        # Calculate performance metrics
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        recall = tpr  # Same as TPR
         f1_score = (
             2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         )
+        accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+        
         print(f"F1 for {concepts}: {f1_score:.4f}")
+        f1_results.append({
+            'concept': concepts,
+            'fp': fp,
+            'fn': fn,
+            'tp': tp,
+            'tn': tn,
+            'fpr': fpr,
+            'tpr': tpr,
+            'fnr': fnr,
+            'tnr': tnr,
+            'f1': f1_score,
+            'accuracy': accuracy
+        })
+
+    # Save F1 results to CSV file with specified column order
+    f1_results_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_f1_scores.csv"
+    f1_df = pd.DataFrame(f1_results)
+    
+    # Reorder columns to match your specification: concept, fp, fn, tp, tn, fpr, tpr, fnr, tnr, f1, accuracy
+    column_order = ['concept', 'fp', 'fn', 'tp', 'tn', 'fpr', 'tpr', 'fnr', 'tnr', 'f1', 'accuracy']
+    f1_df = f1_df[column_order]
+    f1_df.to_csv(f1_results_file, index=False)
+    print(f"F1 scores saved to: {f1_results_file}")
+    
+    # Calculate and save average F1 score
+    avg_f1 = f1_df['f1'].mean()
+    print(f"Average F1 Score: {avg_f1:.4f}")
+    
+    # Save summary statistics
+    summary_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_summary.txt"
+    with open(summary_file, 'w') as f:
+        f.write(f"Prompt-based Concept Extraction Results\n")
+        f.write(f"Dataset: {args.dataset}\n")
+        f.write(f"Model: {args.model}\n")
+        f.write(f"Number of images: {len(extracted_concepts_array)}\n")
+        f.write(f"Number of concepts: {len(concept_names)}\n")
+        f.write(f"Average F1 Score: {avg_f1:.4f}\n\n")
+        f.write("Per-concept results:\n")
+        for result in f1_results:
+            f.write(f"{result['concept']:20s} - F1: {result['f1']:.4f} (Acc: {result['accuracy']:.4f})\n")
+    print(f"Summary saved to: {summary_file}")
 
     # create a bar plot of the F1 scores sorted by F1 score
-    f1_scores = []
-    for idx, concepts in enumerate(concept_names):
-        gt = gt_labels_array[:, idx]
-        pred = extracted_concepts_array[:, idx]
-        # Calculate F1 score
-        tp = np.sum((gt == 1) & (pred == 1))
-        fp = np.sum((gt == 0) & (pred == 1))
-        fn = np.sum((gt == 1) & (pred == 0))
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1_score = (
-            2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-        )
-        f1_scores.append(f1_score)
+    f1_scores = f1_df['f1'].values
     f1_scores = np.array(f1_scores)
     sorted_indices = np.argsort(f1_scores)[::-1]
     sorted_f1_scores = f1_scores[sorted_indices]
@@ -245,18 +383,9 @@ def eval(args):
     plt.axvline(x=0.5, color="r", linestyle="--", label="Threshold")
 
     # save the plot
-    plt.savefig(f"{args.dataset}_{args.model.split('/')[1]}_f1_scores.png")
-
-    # load linsep concepts
-    concepts_file = "linsep_concepts_CLIP_cls_embeddings_percentthrumodel_70.csv"
-    linsep_dists = pd.read_csv(
-        f"/shared_data0/cgoldberg/Concept_Inversion/Experiments/Distances/{args.dataset}/dists_{concepts_file}"
-    )
-    gt_images_per_concept_test = torch.load(
-        f"/shared_data0/cgoldberg/Concept_Inversion/Experiments/GT_Samples/{args.dataset}/gt_images_per_concept_test_image.pt"
-    )
-    thresholds = compute_concept_thresholds(gt_images_per_concept_test, linsep_dists, 0.95)
-    print(thresholds)
+    plot_file = f"{prompt_results_dir}/{args.dataset}_{args.model.split('/')[1]}_f1_scores.png"
+    plt.savefig(plot_file)
+    print(f"F1 scores plot saved to: {plot_file}")
 
 
 if __name__ == "__main__":
@@ -278,7 +407,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/shared_data0/steinad/Concept_Inversion/",
+        default="/workspace/Experiments",
         help="The output directory for extracted concepts.",
     )
     parser.add_argument("--eval", action="store_true", help="Whether to evaluate the concepts.")

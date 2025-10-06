@@ -93,7 +93,7 @@ class ImageDataset(Dataset):
 
 
 def main():
-    root = "/shared_data0/cgoldberg/Concept_Inversion/"
+    root = "/workspace/"
     dataset = ImageDataset(root=root, split="train")
 
     print(f"Number of images in dataset: {len(dataset)}")
@@ -107,7 +107,7 @@ def main():
 
     print()
 
-    root = "/shared_data0/cgoldberg/Concept_Inversion/"
+    root = "/workspace/"
     dataset = ImageDataset(root=root, dataset_name="Coco", split="train")
 
     print(f"Number of images in dataset: {len(dataset)}")

@@ -1,11 +1,11 @@
 import torch
 import sys
 import os
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import gt_concept_segmentation_utils
+import utils.gt_concept_segmentation_utils
 
-from gt_concept_segmentation_utils import map_concepts_to_patch_indices, sort_mapping_by_split
+from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, sort_mapping_by_split
 
 
 PERCENT_THRU_MODEL = 100

@@ -56,4 +56,20 @@ def filter_concept_dict(concept_dict, dataset_name):
         return concept_dict
     return {k: v for k, v in concept_dict.items() if k in allowed_concepts}
 
+def filter_concept_list(concept_list, dataset_name):
+    """
+    Filters a concept dictionary so that only keys corresponding to the given dataset's concepts are retained.
+
+    Args:
+        concept_dict (dict): Dictionary with concept names as keys.
+        dataset_name (str): Name of the dataset (must be a key in concept_map).
+
+    Returns:
+        dict: Filtered concept dictionary.
+    """
+    allowed_concepts = set(DATASET_TO_CONCEPTS.get(dataset_name, []))
+    if len(allowed_concepts) == 0:
+        return concept_dict
+    return [c for c in concept_list if c in allowed_concepts]
+
 

@@ -16,6 +16,7 @@ from matplotlib.lines import Line2D
 import matplotlib.lines as mlines
 import seaborn as sns
 from matplotlib.ticker import ScalarFormatter
+from scipy.ndimage import uniform_filter1d
 import ast
 
 import importlib
@@ -184,7 +185,7 @@ def compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, load
     """
     from utils.memory_management_utils import ChunkedActivationLoader
     
-    cache_file = f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
+    cache_file = f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt' if ('kmeans' in con_label or 'sae' in con_label) else f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
     all_thresholds = {}
     new_percentiles = set(percentiles)
     
@@ -916,11 +917,8 @@ def detect_then_invert_metrics(
         Dict of metrics for each inversion percentile
     """
     # Load thresholds
-    if 'kmeans' not in con_label:
-        threshold_path = f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
-        thresholds = torch.load(threshold_path, weights_only=False)
-    else:
-        # Load files for kmeans
+    if 'kmeans' in con_label or 'sae' in con_label:
+        # Load files for kmeans/sae (unsupervised methods)
         raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
         
@@ -935,9 +933,14 @@ def detect_then_invert_metrics(
                 if key in thresholds_dict:
                     matched_thresholds[concept] = thresholds_dict[key]
             thresholds[percentile] = matched_thresholds
+    else:
+        # Load thresholds for supervised methods
+        threshold_path = f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt'
+        thresholds = torch.load(threshold_path, weights_only=False)
 
     # Get detection thresholds
     detect_thresholds = thresholds[detect_percentile]
+    
     # Get detected patches using loader-compatible function
     # Use the specified split (cal for calibration, test for test evaluation)
     detected_patches = get_patch_detection_tensor_loader(
@@ -1162,8 +1165,8 @@ def detect_then_invert_metrics_over_percentiles(
         print(f"Processing {len(invert_percentiles)} inversion percentiles...")
         
         # Load all thresholds we need
-        if 'kmeans' not in con_label:
-            all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+        if 'kmeans' not in con_label and 'sae' not in con_label:
+            all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt' if ('kmeans' in con_label or 'sae' in con_label) else f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
         else:
             raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
             alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
@@ -1191,6 +1194,9 @@ def detect_then_invert_metrics_over_percentiles(
                 filtered_concepts = {c: concepts[c] for c in concept_list if c in concepts}
                 
                 if filtered_concepts:
+                    if invert_percentile == invert_percentiles[0] and detect_perc == list(concepts_by_detect.keys())[0]:
+                        print(f"   First batch: {len(filtered_concepts)} concepts with detect_perc={detect_perc}, invert_perc={invert_percentile}")
+                    
                     # Call detect_then_invert_metrics once for this batch
                     metrics = detect_then_invert_metrics(
                         detect_perc, [invert_percentile],
@@ -1298,8 +1304,8 @@ def find_optimal_detect_invert_thresholds(invert_percentiles, dataset_name,
         # Store optimal thresholds for this concept
         if best_detect is not None:
             # Load the actual threshold values used for this concept
-            if 'kmeans' not in con_label:
-                all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+            if 'kmeans' not in con_label and 'sae' not in con_label:
+                all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt' if ('kmeans' in con_label or 'sae' in con_label) else f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
                 detect_threshold = all_thresholds[best_detect][str(concept)]
                 invert_threshold = all_thresholds[best_invert][str(concept)]
             else:
@@ -1457,8 +1463,8 @@ def detect_then_invert_with_optimal_thresholds(
     
     for detect_per, invert_per in tqdm(unique_combinations, desc="Evaluating optimal thresholds"):
         # Load thresholds for this combination
-        if 'kmeans' not in con_label:
-            all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+        if 'kmeans' not in con_label and 'sae' not in con_label:
+            all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt' if ('kmeans' in con_label or 'sae' in con_label) else f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
         else:
             # Handle kmeans thresholds
             raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
@@ -1894,7 +1900,7 @@ def compute_concept_metrics(fp_count, fn_count, tp_count, tn_count, concepts, da
     metrics_df['concept'] = list(tp_count.keys())
     
     # Map cluster IDs to concept names for unsupervised methods
-    if 'kmeans' in con_label:
+    if 'kmeans' in con_label or 'sae' in con_label:
         alignment_results = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
         cluster_to_concept = {str(info['best_cluster']): concept_name for concept_name, info in alignment_results.items()}
         metrics_df['concept'] = metrics_df['concept'].map(lambda x: cluster_to_concept.get(str(x), str(x)))
@@ -2055,7 +2061,7 @@ def compute_metrics_across_percentiles(gt_patches_per_concept_test, concepts, si
                                       all_object_patches=None):
     """Computes metrics across dataset using different thresholds"""
     if 'kmeans' not in con_label:
-        all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
+        all_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt' if ('kmeans' in con_label or 'sae' in con_label) else f'Thresholds/{dataset_name}/all_percentiles_{con_label}.pt', weights_only=False)
     else:
         # Load files
         raw_thresholds = torch.load(f'Thresholds/{dataset_name}/all_percentiles_allpairs_{con_label}.pt', weights_only=False)
@@ -2431,21 +2437,448 @@ def concept_heatmap_random_samples(concept_embeddings, con_label, num_samples=15
                    dataset_name=dataset_name, save_label=save_label)
     
 
-def compute_cossim_hist_stats(gt_samples_per_concept, acts_loader, dataset_name, percentile, sample_type, model_input_size, con_label, patch_size=14, all_object_patches=None, concepts_to_process=None):
+def compute_pr_curves_and_optimal_thresholds_gpu(stats, device='cuda', n_thresholds=1000, batch_size=10, compute_random_baseline=True):
+    """
+    GPU-accelerated computation of precision-recall curves and optimal thresholds.
+    
+    Args:
+        stats (dict): Dictionary with train/test splits containing in/out concept similarities
+        device (str): Device to use for computation
+        n_thresholds (int): Number of thresholds to evaluate
+        batch_size (int): Number of concepts to process simultaneously
+        compute_random_baseline (bool): Whether to compute random baseline PR curves
+    
+    Returns:
+        tuple: (optimal_thresholds, pr_curves)
+            - optimal_thresholds: Dict with optimal threshold and metrics for each concept
+            - pr_curves: Dict with precision/recall arrays for plotting PR curves (includes 'random' key if compute_random_baseline=True)
+    """
+    optimal_thresholds = {}
+    pr_curves = {}
+    concepts = list(stats['train'].keys())
+    
+    # Pre-allocate shared threshold tensor
+    global_min = float('inf')
+    global_max = float('-inf')
+    
+    # First pass: find global min/max for threshold range
+    for concept in concepts:
+        in_sims = stats['train'][concept]['in_concept_sims']
+        out_sims = stats['train'][concept]['out_concept_sims']
+        if len(in_sims) > 0 and len(out_sims) > 0:
+            all_sims = in_sims + out_sims
+            global_min = min(global_min, min(all_sims))
+            global_max = max(global_max, max(all_sims))
+    
+    # Create shared threshold candidates
+    thresholds = torch.linspace(global_min, global_max, n_thresholds, device=device)
+    
+    # Process concepts in batches
+    for batch_start in range(0, len(concepts), batch_size):
+        batch_end = min(batch_start + batch_size, len(concepts))
+        batch_concepts = concepts[batch_start:batch_end]
+        
+        # Collect all data for this batch
+        batch_in_sims = []
+        batch_out_sims = []
+        batch_test_in_sims = []
+        batch_test_out_sims = []
+        valid_concepts = []
+        
+        for concept in batch_concepts:
+            in_sims = stats['train'][concept]['in_concept_sims']
+            out_sims = stats['train'][concept]['out_concept_sims']
+            
+            if len(in_sims) == 0 or len(out_sims) == 0:
+                optimal_thresholds[concept] = {
+                    'threshold': 0.0,
+                    'train_precision': 0.0,
+                    'train_recall': 0.0,
+                    'train_f1': 0.0,
+                    'test_precision': 0.0,
+                    'test_recall': 0.0,
+                    'test_f1': 0.0
+                }
+                continue
+            
+            valid_concepts.append(concept)
+            batch_in_sims.append(torch.tensor(in_sims, device=device))
+            batch_out_sims.append(torch.tensor(out_sims, device=device))
+            batch_test_in_sims.append(torch.tensor(stats['test'][concept]['in_concept_sims'], device=device))
+            batch_test_out_sims.append(torch.tensor(stats['test'][concept]['out_concept_sims'], device=device))
+        
+        if not valid_concepts:
+            continue
+        
+        # Process all concepts in this batch simultaneously
+        batch_results = []
+        
+        # Use torch.nn.functional.pad to handle different sizes efficiently
+        max_in_size = max(len(sims) for sims in batch_in_sims)
+        max_out_size = max(len(sims) for sims in batch_out_sims)
+        
+        # Skip if sizes are too large (potential memory issue)
+        # Check memory requirement more accurately
+        total_comparisons = sum(len(in_s) + len(out_s) for in_s, out_s in zip(batch_in_sims, batch_out_sims))
+        estimated_memory_gb = (total_comparisons * n_thresholds * 4) / (1024**3)
+        if estimated_memory_gb > 5:  # If would use more than 5GB
+            # Process concepts one by one if batch would be too large
+            for idx, concept in enumerate(valid_concepts):
+                in_sims = batch_in_sims[idx]
+                out_sims = batch_out_sims[idx]
+                
+                # Process single concept with chunked thresholds to save memory
+                chunk_size_thresh = 100  # Process 100 thresholds at a time
+                all_precision = []
+                all_recall = []
+                all_f1 = []
+                
+                for t_start in range(0, n_thresholds, chunk_size_thresh):
+                    t_end = min(t_start + chunk_size_thresh, n_thresholds)
+                    thresh_chunk = thresholds[t_start:t_end]
+                    
+                    # Compute for this chunk of thresholds
+                    thresh_expanded = thresh_chunk.unsqueeze(1)
+                    tp = (in_sims.unsqueeze(0) >= thresh_expanded).sum(dim=1).float()
+                    fp = (out_sims.unsqueeze(0) >= thresh_expanded).sum(dim=1).float()
+                    fn = len(in_sims) - tp
+                    
+                    precision_chunk = tp / (tp + fp + 1e-8)
+                    recall_chunk = tp / (tp + fn + 1e-8)
+                    f1_chunk = 2 * precision_chunk * recall_chunk / (precision_chunk + recall_chunk + 1e-8)
+                    
+                    all_precision.append(precision_chunk)
+                    all_recall.append(recall_chunk)
+                    all_f1.append(f1_chunk)
+                
+                # Combine all chunks
+                precision = torch.cat(all_precision)
+                recall = torch.cat(all_recall)
+                f1 = torch.cat(all_f1)
+                
+                best_idx = f1.argmax()
+                best_threshold = thresholds[best_idx].item()
+                
+                # Test metrics
+                test_in_sims = batch_test_in_sims[idx]
+                test_out_sims = batch_test_out_sims[idx]
+                
+                if len(test_in_sims) > 0 and len(test_out_sims) > 0:
+                    test_tp = (test_in_sims >= best_threshold).sum().float()
+                    test_fp = (test_out_sims >= best_threshold).sum().float()
+                    test_fn = len(test_in_sims) - test_tp
+                    test_precision = (test_tp / (test_tp + test_fp + 1e-8)).item()
+                    test_recall = (test_tp / (test_tp + test_fn + 1e-8)).item()
+                    test_f1 = 2 * test_precision * test_recall / (test_precision + test_recall + 1e-8) if (test_precision + test_recall) > 0 else 0
+                else:
+                    test_precision = test_recall = test_f1 = 0.0
+                
+                optimal_thresholds[concept] = {
+                    'threshold': best_threshold,
+                    'train_precision': precision[best_idx].item(),
+                    'train_recall': recall[best_idx].item(),
+                    'train_f1': f1[best_idx].item(),
+                    'test_precision': test_precision,
+                    'test_recall': test_recall,
+                    'test_f1': test_f1
+                }
+                
+                # Store PR curves data for train split
+                pr_curves[concept] = {
+                    'train': {
+                        'precision': precision.cpu().numpy(),
+                        'recall': recall.cpu().numpy(),
+                        'f1': f1.cpu().numpy(),
+                        'optimal_idx': best_idx.item()
+                    },
+                    'test': {},  # Will be filled below
+                    'thresholds': thresholds.cpu().numpy()
+                }
+                
+                # Compute PR curve for test split if data exists
+                if len(test_in_sims) > 0 and len(test_out_sims) > 0:
+                    # Process test data in chunks too
+                    test_precision_list = []
+                    test_recall_list = []
+                    test_f1_list = []
+                    
+                    for t_start in range(0, n_thresholds, chunk_size_thresh):
+                        t_end = min(t_start + chunk_size_thresh, n_thresholds)
+                        thresh_chunk = thresholds[t_start:t_end]
+                        
+                        thresh_expanded = thresh_chunk.unsqueeze(1)
+                        test_tp = (test_in_sims.unsqueeze(0) >= thresh_expanded).sum(dim=1).float()
+                        test_fp = (test_out_sims.unsqueeze(0) >= thresh_expanded).sum(dim=1).float()
+                        test_fn = len(test_in_sims) - test_tp
+                        
+                        test_prec_chunk = test_tp / (test_tp + test_fp + 1e-8)
+                        test_rec_chunk = test_tp / (test_tp + test_fn + 1e-8)
+                        test_f1_chunk = 2 * test_prec_chunk * test_rec_chunk / (test_prec_chunk + test_rec_chunk + 1e-8)
+                        
+                        test_precision_list.append(test_prec_chunk)
+                        test_recall_list.append(test_rec_chunk)
+                        test_f1_list.append(test_f1_chunk)
+                    
+                    pr_curves[concept]['test'] = {
+                        'precision': torch.cat(test_precision_list).cpu().numpy(),
+                        'recall': torch.cat(test_recall_list).cpu().numpy(),
+                        'f1': torch.cat(test_f1_list).cpu().numpy(),
+                        'optimal_idx': best_idx.item()
+                    }
+            continue
+        
+        # Pad and stack tensors
+        padded_in_sims = []
+        padded_out_sims = []
+        in_masks = []
+        out_masks = []
+        
+        for in_sims, out_sims in zip(batch_in_sims, batch_out_sims):
+            # Pad in_sims
+            pad_in = max_in_size - len(in_sims)
+            padded_in = F.pad(in_sims, (0, pad_in), value=float('-inf'))
+            padded_in_sims.append(padded_in)
+            in_mask = torch.ones(len(in_sims), device=device)
+            in_mask = F.pad(in_mask, (0, pad_in), value=0)
+            in_masks.append(in_mask)
+            
+            # Pad out_sims
+            pad_out = max_out_size - len(out_sims)
+            padded_out = F.pad(out_sims, (0, pad_out), value=float('inf'))
+            padded_out_sims.append(padded_out)
+            out_mask = torch.ones(len(out_sims), device=device)
+            out_mask = F.pad(out_mask, (0, pad_out), value=0)
+            out_masks.append(out_mask)
+        
+        # Stack all concepts
+        in_sims_batch = torch.stack(padded_in_sims)  # (batch, max_in_size)
+        out_sims_batch = torch.stack(padded_out_sims)  # (batch, max_out_size)
+        in_masks_batch = torch.stack(in_masks)  # (batch, max_in_size)
+        out_masks_batch = torch.stack(out_masks)  # (batch, max_out_size)
+        
+        # Expand for broadcasting
+        thresholds_expanded = thresholds.view(1, n_thresholds, 1)  # (1, n_thresholds, 1)
+        in_sims_expanded = in_sims_batch.unsqueeze(1)  # (batch, 1, max_in_size)
+        out_sims_expanded = out_sims_batch.unsqueeze(1)  # (batch, 1, max_out_size)
+        in_masks_expanded = in_masks_batch.unsqueeze(1)  # (batch, 1, max_in_size)
+        out_masks_expanded = out_masks_batch.unsqueeze(1)  # (batch, 1, max_out_size)
+        
+        # Compute TP and FP for all concepts and thresholds at once
+        tp = ((in_sims_expanded >= thresholds_expanded) * in_masks_expanded).sum(dim=2)  # (batch, n_thresholds)
+        fp = ((out_sims_expanded >= thresholds_expanded) * out_masks_expanded).sum(dim=2)  # (batch, n_thresholds)
+        
+        # Total positives and negatives
+        total_positives = in_masks_batch.sum(dim=1, keepdim=True)  # (batch, 1)
+        total_negatives = out_masks_batch.sum(dim=1, keepdim=True)  # (batch, 1)
+        
+        fn = total_positives - tp
+        tn = total_negatives - fp
+        
+        # Compute metrics
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+        
+        # Find best threshold for each concept
+        best_indices = f1.argmax(dim=1)  # (batch,)
+        
+        # Extract results for each concept
+        for i, (concept, best_idx) in enumerate(zip(valid_concepts, best_indices)):
+            best_threshold = thresholds[best_idx].item()
+            
+            # Get test metrics
+            test_in_sims = batch_test_in_sims[i]
+            test_out_sims = batch_test_out_sims[i]
+            
+            if len(test_in_sims) > 0 and len(test_out_sims) > 0:
+                test_tp = (test_in_sims >= best_threshold).sum().float()
+                test_fp = (test_out_sims >= best_threshold).sum().float()
+                test_fn = len(test_in_sims) - test_tp
+                test_tn = len(test_out_sims) - test_fp
+                
+                test_precision = (test_tp / (test_tp + test_fp + 1e-8)).item()
+                test_recall = (test_tp / (test_tp + test_fn + 1e-8)).item()
+                test_f1 = 2 * test_precision * test_recall / (test_precision + test_recall + 1e-8) if (test_precision + test_recall) > 0 else 0
+            else:
+                test_precision = test_recall = test_f1 = 0.0
+            
+            optimal_thresholds[concept] = {
+                'threshold': best_threshold,
+                'train_precision': precision[i, best_idx].item(),
+                'train_recall': recall[i, best_idx].item(),
+                'train_f1': f1[i, best_idx].item(),
+                'test_precision': test_precision,
+                'test_recall': test_recall,
+                'test_f1': test_f1
+            }
+            
+            # Store PR curves data for train split
+            pr_curves[concept] = {
+                'train': {
+                    'precision': precision[i].cpu().numpy(),
+                    'recall': recall[i].cpu().numpy(),
+                    'f1': f1[i].cpu().numpy(),
+                    'optimal_idx': best_idx.item()
+                },
+                'test': {},  # Will be filled below
+                'thresholds': thresholds.cpu().numpy()
+            }
+            
+            # Compute PR curve for test split if data exists
+            if len(test_in_sims) > 0 and len(test_out_sims) > 0:
+                # Compute full PR curve for test data
+                test_tp = (test_in_sims.unsqueeze(0) >= thresholds.unsqueeze(1)).sum(dim=1).float()
+                test_fp = (test_out_sims.unsqueeze(0) >= thresholds.unsqueeze(1)).sum(dim=1).float()
+                test_fn = len(test_in_sims) - test_tp
+                
+                test_precision_full = test_tp / (test_tp + test_fp + 1e-8)
+                test_recall_full = test_tp / (test_tp + test_fn + 1e-8)
+                test_f1_full = 2 * test_precision_full * test_recall_full / (test_precision_full + test_recall_full + 1e-8)
+                
+                pr_curves[concept]['test'] = {
+                    'precision': test_precision_full.cpu().numpy(),
+                    'recall': test_recall_full.cpu().numpy(),
+                    'f1': test_f1_full.cpu().numpy(),
+                    'optimal_idx': best_idx.item()  # Using same threshold as train
+                }
+    
+    # Compute random baselines if requested
+    if compute_random_baseline:
+        random_pr_curves = compute_random_baseline_pr_curves(stats, n_thresholds=n_thresholds)
+        # Add random baselines to each concept's pr_curves
+        for concept in pr_curves:
+            if concept in random_pr_curves:
+                pr_curves[concept]['random_train'] = random_pr_curves[concept].get('train', {})
+                pr_curves[concept]['random_test'] = random_pr_curves[concept].get('test', {})
+    
+    return optimal_thresholds, pr_curves
+
+
+def compute_random_baseline_pr_curves(stats, n_thresholds=1000, random_seed=42):
+    """
+    Computes PR curves for random baselines by assigning activations from a normal distribution
+    that matches the mean and std of the actual data.
+    
+    Args:
+        stats (dict): Dictionary with train/test splits containing in/out concept similarities
+        n_thresholds (int): Number of thresholds to evaluate
+        random_seed (int): Random seed for reproducibility
+        
+    Returns:
+        dict: Random baseline PR curves for each concept
+    """
+    np.random.seed(random_seed)
+    random_pr_curves = {}
+    
+    for concept in stats['train'].keys():
+        # Get the actual data to match distribution
+        all_sims = stats['train'][concept]['in_concept_sims'] + stats['train'][concept]['out_concept_sims']
+        if len(all_sims) == 0:
+            continue
+            
+        # Compute mean and std of actual data
+        data_mean = np.mean(all_sims)
+        data_std = np.std(all_sims)
+        
+        # Get the same number of in/out samples
+        n_in = len(stats['train'][concept]['in_concept_sims'])
+        n_out = len(stats['train'][concept]['out_concept_sims'])
+        
+        # Generate random activations from normal distribution
+        random_in_sims = np.random.normal(data_mean, data_std, n_in)
+        random_out_sims = np.random.normal(data_mean, data_std, n_out)
+        
+        # Use the same threshold range as actual data
+        thresholds = np.linspace(min(all_sims), max(all_sims), n_thresholds)
+        
+        # Compute PR curve for random baseline
+        precision_values = []
+        recall_values = []
+        f1_values = []
+        
+        for thresh in thresholds:
+            tp = np.sum(random_in_sims >= thresh)
+            fn = n_in - tp
+            fp = np.sum(random_out_sims >= thresh)
+            
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            
+            precision_values.append(precision)
+            recall_values.append(recall)
+            f1_values.append(f1)
+        
+        # Store random baseline PR curve
+        random_pr_curves[concept] = {
+            'train': {
+                'precision': np.array(precision_values),
+                'recall': np.array(recall_values),
+                'f1': np.array(f1_values),
+                'optimal_idx': np.argmax(f1_values)
+            },
+            'test': {},  # Could compute for test too if needed
+            'thresholds': thresholds
+        }
+        
+        # Also compute for test split if available
+        if len(stats['test'][concept]['in_concept_sims']) > 0 and len(stats['test'][concept]['out_concept_sims']) > 0:
+            n_in_test = len(stats['test'][concept]['in_concept_sims'])
+            n_out_test = len(stats['test'][concept]['out_concept_sims'])
+            
+            random_in_sims_test = np.random.normal(data_mean, data_std, n_in_test)
+            random_out_sims_test = np.random.normal(data_mean, data_std, n_out_test)
+            
+            precision_test = []
+            recall_test = []
+            f1_test = []
+            
+            for thresh in thresholds:
+                tp = np.sum(random_in_sims_test >= thresh)
+                fn = n_in_test - tp
+                fp = np.sum(random_out_sims_test >= thresh)
+                
+                prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+                rec = tp / (tp + fn) if (tp + fn) > 0 else 0
+                f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0
+                
+                precision_test.append(prec)
+                recall_test.append(rec)
+                f1_test.append(f1)
+            
+            random_pr_curves[concept]['test'] = {
+                'precision': np.array(precision_test),
+                'recall': np.array(recall_test),
+                'f1': np.array(f1_test),
+                'optimal_idx': np.argmax(f1_test)
+            }
+    
+    return random_pr_curves
+
+
+def compute_cossim_hist_stats(gt_samples_per_concept, acts_loader, dataset_name, percentile, sample_type, model_input_size, con_label, patch_size=14, all_object_patches=None, concepts_to_process=None, device='cpu', compute_random_baseline=True):
     """
     Computes in-sample and out-of-sample cosine similarity statistics for each concept, separated by train and test splits.
+    Also computes optimal thresholds for maximum in/out concept separability.
 
     Args:
-        concept_thresholds (dict): Dictionary mapping concepts to (threshold, random_threshold).
         gt_samples_per_concept (dict): Dictionary mapping concepts to sets of true concept patch indices.
         acts_loader: ChunkedActivationLoader instance or DataFrame with activations.
         dataset_name (str): The name of the dataset, used to load the correct metadata file.
-        percentile (float): Percentile of in-sample patches to compute the threshold.
+        percentile (float): Percentile value (currently unused but kept for compatibility).
+        sample_type (str): Type of samples ('patch', 'token', etc.).
+        model_input_size (int): Input size of the model.
+        con_label (str): Concept label for saving files.
+        patch_size (int): Size of patches for patch-level analysis.
         all_object_patches (set, optional): Set of patch indices to consider. If provided, only these patches are considered.
         concepts_to_process (list, optional): List of specific concepts to process. If None, processes all concepts.
+        device (str): Device to use for computation ('cuda' or 'cpu').
 
     Returns:
-        dict: A dictionary with per-concept cosine similarity stats, separated by train and test splits.
+        tuple: (stats, optimal_thresholds, pr_curves)
+            - stats: Dictionary with per-concept cosine similarity stats, separated by train and test splits
+            - optimal_thresholds: Dictionary with optimal threshold and metrics for each concept
+            - pr_curves: Dictionary with precision/recall arrays for plotting PR curves
     """
     # Handle both ChunkedActivationLoader and DataFrame inputs
     if hasattr(acts_loader, 'load_full_dataframe'):
@@ -2498,51 +2931,67 @@ def compute_cossim_hist_stats(gt_samples_per_concept, acts_loader, dataset_name,
     
     if is_chunked_loader:
         # Process all concepts in one pass through chunks
-        chunk_size = 50000
+        # Larger chunk size for GPU processing (was 50000)
+        chunk_size = 500000 if device != 'cpu' else 100000
         total_samples = acts_loader.total_samples
         
         
         for start_idx in tqdm(range(0, total_samples, chunk_size), desc="Processing chunks"):
             end_idx = min(start_idx + chunk_size, total_samples)
             
-            # Load chunk once
-            chunk_df = acts_loader.load_chunk_range(start_idx, end_idx)
+            # Load chunk once - get all concepts for this range as DataFrame
+            chunk_df = acts_loader.load_concept_range(acts_loader.columns, start_idx, end_idx)
             
             # Get indices and masks for this chunk
             chunk_indices = list(range(start_idx, end_idx))
             chunk_train_mask = train_mask.iloc[start_idx:end_idx].reset_index(drop=True)
             chunk_test_mask = test_mask.iloc[start_idx:end_idx].reset_index(drop=True)
             
+            # Convert to tensors for GPU processing
+            chunk_indices_tensor = torch.tensor(chunk_indices, device=device)
+            chunk_train_mask_tensor = torch.tensor(chunk_train_mask.values, dtype=torch.bool, device=device)
+            chunk_test_mask_tensor = torch.tensor(chunk_test_mask.values, dtype=torch.bool, device=device)
+            
             # Process each concept for this chunk
             for concept, concept_indices in processed_concept_indices.items():
                 if concept not in chunk_df.columns:
                     continue
                 
-                # Create masks for this concept
-                chunk_in_gt_mask = pd.Series(chunk_indices).isin(concept_indices)
+                # Create masks for this concept using GPU tensors
+                concept_indices_tensor = torch.tensor(list(concept_indices), device=device)
+                chunk_in_gt_mask = torch.isin(chunk_indices_tensor, concept_indices_tensor)
+                
                 if all_object_patches is not None:
-                    chunk_out_gt_mask = pd.Series(chunk_indices).isin(all_object_patches - concept_indices)
+                    out_indices = list(all_object_patches - concept_indices)
+                    if out_indices:  # Only create tensor if there are indices
+                        out_indices_tensor = torch.tensor(out_indices, device=device)
+                        chunk_out_gt_mask = torch.isin(chunk_indices_tensor, out_indices_tensor)
+                    else:
+                        chunk_out_gt_mask = torch.zeros_like(chunk_in_gt_mask)
                 else:
                     chunk_out_gt_mask = ~chunk_in_gt_mask
                 
-                # Get cosine similarities
-                cos_vals = chunk_df[concept]
+                # Get cosine similarities as tensor
+                cos_vals_tensor = torch.tensor(chunk_df[concept].values, device=device)
                 
-                # Extract and store values
-                train_in = cos_vals[chunk_train_mask & chunk_in_gt_mask].tolist()
-                test_in = cos_vals[chunk_test_mask & chunk_in_gt_mask].tolist()
-                train_out = cos_vals[chunk_train_mask & chunk_out_gt_mask].tolist()
-                test_out = cos_vals[chunk_test_mask & chunk_out_gt_mask].tolist()
+                # Extract values using GPU masking
+                train_in = cos_vals_tensor[chunk_train_mask_tensor & chunk_in_gt_mask]
+                test_in = cos_vals_tensor[chunk_test_mask_tensor & chunk_in_gt_mask]
+                train_out = cos_vals_tensor[chunk_train_mask_tensor & chunk_out_gt_mask]
+                test_out = cos_vals_tensor[chunk_test_mask_tensor & chunk_out_gt_mask]
                 
-                stats['train'][concept]['in_concept_sims'].extend(train_in)
-                stats['test'][concept]['in_concept_sims'].extend(test_in)
-                stats['train'][concept]['out_concept_sims'].extend(train_out)
-                stats['test'][concept]['out_concept_sims'].extend(test_out)
+                # Convert to CPU and list for storage
+                stats['train'][concept]['in_concept_sims'].extend(train_in.cpu().tolist())
+                stats['test'][concept]['in_concept_sims'].extend(test_in.cpu().tolist())
+                stats['train'][concept]['out_concept_sims'].extend(train_out.cpu().tolist())
+                stats['test'][concept]['out_concept_sims'].extend(test_out.cpu().tolist())
                 
             
             # Clear chunk from memory
             del chunk_df
             gc.collect()
+            if device != 'cpu' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     else:
         # Original non-chunked logic
@@ -2563,15 +3012,429 @@ def compute_cossim_hist_stats(gt_samples_per_concept, acts_loader, dataset_name,
             stats['train'][concept]['out_concept_sims'] = cos_vals[train_mask & out_gt_mask].tolist()
             stats['test'][concept]['out_concept_sims'] = cos_vals[test_mask & out_gt_mask].tolist()
     
+    # Compute optimal thresholds and PR curves
+    optimal_thresholds, pr_curves = compute_pr_curves_and_optimal_thresholds_gpu(stats, device=device, batch_size=1, compute_random_baseline=compute_random_baseline)
+    
+    # Create directory if it doesn't exist
+    os.makedirs(f'Hist_Stats/{dataset_name}', exist_ok=True)
+    
     if all_object_patches is not None:
         torch.save(stats, f'Hist_Stats/{dataset_name}/histstats_justobj_{con_label}.pt')
     else:
         torch.save(stats, f'Hist_Stats/{dataset_name}/histstats_{con_label}.pt')
 
-    return stats
+    return stats, optimal_thresholds, pr_curves
 
 
-def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, plot_type="both", metric_type='Cosine Similarity', percentile=None, bins=50, concepts=None, save_path=None, vmin=None, vmax=None):
+def plot_weighted_average_pr_curve(pr_curves, gt_samples_per_concept, split='test', save_path=None):
+    """
+    Plots a weighted average precision-recall curve across all concepts.
+    Weights are based on the number of ground truth samples per concept.
+    
+    Args:
+        pr_curves (dict): PR curve data from compute_pr_curves_and_optimal_thresholds_gpu
+        gt_samples_per_concept (dict): Dictionary mapping concepts to sets of ground truth sample indices
+        split (str): Which split to plot ('train' or 'test')
+        save_path (str, optional): Path to save the figure
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Collect data for all concepts
+    all_precisions = []
+    all_recalls = []
+    all_f1s = []
+    weights = []
+    valid_concepts = []
+    
+    for concept in pr_curves.keys():
+        if split in pr_curves[concept] and pr_curves[concept][split]:
+            # Get the PR curve data
+            pr_data = pr_curves[concept][split]
+            all_precisions.append(pr_data['precision'])
+            all_recalls.append(pr_data['recall'])
+            all_f1s.append(pr_data['f1'])
+            
+            # Get the weight (number of GT samples)
+            weight = len(gt_samples_per_concept.get(concept, []))
+            weights.append(weight)
+            valid_concepts.append(concept)
+    
+    if not valid_concepts:
+        print(f"No valid concepts found for {split} split")
+        return
+    
+    # Convert to numpy arrays
+    weights = np.array(weights, dtype=float)
+    weights = weights / weights.sum()  # Normalize weights
+    
+    # Find common recall points for interpolation
+    # Use the finest grid from all curves
+    recall_points = np.linspace(0, 1, 1000)
+    
+    # Interpolate all curves to common recall points
+    interpolated_precisions = []
+    for i, (precision, recall) in enumerate(zip(all_precisions, all_recalls)):
+        # Sort by recall for proper interpolation
+        sort_idx = np.argsort(recall)
+        recall_sorted = recall[sort_idx]
+        precision_sorted = precision[sort_idx]
+        
+        # Interpolate
+        interp_precision = np.interp(recall_points, recall_sorted, precision_sorted)
+        interpolated_precisions.append(interp_precision)
+    
+    # Compute weighted average
+    interpolated_precisions = np.array(interpolated_precisions)
+    weighted_avg_precision = np.average(interpolated_precisions, axis=0, weights=weights)
+    
+    # Compute weighted standard deviation for error band
+    # Use weighted variance formula: sum(w_i * (x_i - weighted_mean)^2) / sum(w_i)
+    weighted_variance = np.average((interpolated_precisions - weighted_avg_precision)**2, axis=0, weights=weights)
+    weighted_std = np.sqrt(weighted_variance)
+    
+    # Compute F1 score for the weighted average
+    weighted_f1 = 2 * weighted_avg_precision * recall_points / (weighted_avg_precision + recall_points + 1e-8)
+    
+    # Find optimal F1 point
+    weighted_optimal_idx = np.argmax(weighted_f1)
+    
+    # Create plot
+    plt.figure(figsize=(10, 8))
+    
+    # Plot error band (±1 std dev)
+    plt.fill_between(recall_points, 
+                    np.maximum(0, weighted_avg_precision - weighted_std), 
+                    np.minimum(1, weighted_avg_precision + weighted_std), 
+                    alpha=0.3, color='blue', label='±1 Std Dev')
+    
+    # Plot weighted average curve
+    plt.plot(recall_points, weighted_avg_precision, 'b-', linewidth=3, 
+             label=f'Weighted Average')
+    
+    # Mark optimal F1 point
+    plt.plot(recall_points[weighted_optimal_idx], weighted_avg_precision[weighted_optimal_idx], 
+             'ro', markersize=10, label=f'Optimal F1={weighted_f1[weighted_optimal_idx]:.3f}')
+    
+    # Add F1 score isolines
+    f1_lines = np.array([0.2, 0.4, 0.6, 0.8])
+    for f1_score in f1_lines:
+        min_recall = f1_score / 2 + 0.01
+        x = np.linspace(min_recall, 1, 500)
+        y = f1_score * x / (2 * x - f1_score)
+        valid_mask = y <= 1
+        if np.any(valid_mask):
+            plt.plot(x[valid_mask], y[valid_mask], '--', color='gray', alpha=0.3, linewidth=1)
+            label_idx = len(x[valid_mask]) * 3 // 4
+            if label_idx < len(x[valid_mask]):
+                plt.text(x[valid_mask][label_idx] + 0.02, 
+                        y[valid_mask][label_idx] + 0.02, 
+                        f'F1={f1_score}', fontsize=8, color='gray', alpha=0.7)
+    
+    # Formatting
+    plt.xlabel('Recall', fontsize=12)
+    plt.ylabel('Precision', fontsize=12)
+    plt.title(f'Weighted Average Precision-Recall Curve ({split.capitalize()} Split)', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.xlim([0, 1.05])
+    plt.ylim([0, 1.05])
+    plt.legend(loc='lower left', fontsize=10)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    plt.show()
+
+
+def plot_precision_recall_curves_overlay(pr_curves, optimal_thresholds, concepts=None, split='train', save_path=None, show_random_baseline=True, figsize=(5.5, 6), title_font_size=14, label_font_size=12, legend_font=None):
+    """
+    Plots all precision-recall curves overlaid on a single plot with optimal F1 points marked.
+    
+    Args:
+        pr_curves (dict): PR curve data from compute_pr_curves_and_optimal_thresholds_gpu
+        optimal_thresholds (dict): Optimal threshold data with F1 scores
+        concepts (list, optional): List of concepts to plot. If None, plots all.
+        split (str): Which split to plot ('train' or 'test')
+        save_path (str, optional): Path to save the figure
+        show_random_baseline (bool): Whether to show random baseline curves if available
+        figsize (tuple): Figure size as (width, height). Default is (5.5, 6)
+        title_font_size (int): Font size for title. Default is 14
+        label_font_size (int): Font size for axis labels. Default is 12
+        legend_font (int, optional): Font size for legend. If None, uses label_font_size. Default is None
+    """
+    if concepts is None:
+        concepts = list(pr_curves.keys())
+    
+    # Use legend_font if provided, otherwise use label_font_size
+    if legend_font is None:
+        legend_font = label_font_size
+    
+    # Apply paper plotting style from general_utils
+    utils.general_utils.apply_paper_plotting_style()
+    
+    # Create figure with specified size
+    plt.figure(figsize=figsize)
+    
+    # Use same color scheme as plot_cosine_similarity_histograms threshold lines
+    if len(concepts) <= 4:
+        threshold_colors = ['green', 'purple', 'chocolate', 'deeppink']
+        colors = threshold_colors[:len(concepts)]
+    else:
+        # For more than 4 concepts, cycle through the colors
+        base_colors = ['green', 'purple', 'chocolate', 'deeppink']
+        colors = [base_colors[i % 4] for i in range(len(concepts))]
+    
+    # Track if we have any valid data
+    has_valid_data = False
+    
+    for idx, (concept, color) in enumerate(zip(concepts, colors)):
+        # Check if split data exists
+        if split not in pr_curves[concept] or not pr_curves[concept][split]:
+            continue
+            
+        has_valid_data = True
+        
+        # Get PR curve data for the selected split
+        pr_data = pr_curves[concept][split]
+        precision = pr_data['precision']
+        recall = pr_data['recall']
+        f1_scores = pr_data['f1']
+        optimal_idx = pr_data['optimal_idx']
+        
+        # Apply simple moving average smoothing for visualization
+        window_size = 20  # Smooth over 20 points
+        
+        if len(recall) > window_size:
+            # Apply smoothing
+            recall_smooth = uniform_filter1d(recall, size=window_size, mode='nearest')
+            precision_smooth = uniform_filter1d(precision, size=window_size, mode='nearest')
+            
+            # Ensure monotonicity in recall (PR curves should have decreasing recall)
+            # Sort by recall in descending order
+            sort_idx = np.argsort(-recall_smooth)
+            recall_smooth = recall_smooth[sort_idx]
+            precision_smooth = precision_smooth[sort_idx]
+            
+            # Clean concept name for legend - only show part after '::' if present
+            display_name = concept.split('::')[-1].capitalize() if '::' in concept else concept.capitalize()
+            plt.plot(recall_smooth, precision_smooth, color=color, linewidth=2, alpha=0.8, label=display_name)
+        else:
+            # Fallback for too few points
+            # Clean concept name for legend - only show part after '::' if present
+            display_name = concept.split('::')[-1].capitalize() if '::' in concept else concept.capitalize()
+            plt.plot(recall, precision, color=color, linewidth=2, alpha=0.8, label=display_name)
+        
+        # Mark optimal F1 point
+        opt_recall = recall[optimal_idx]
+        opt_precision = precision[optimal_idx]
+        opt_f1 = f1_scores[optimal_idx]
+        
+        plt.plot(opt_recall, opt_precision, 'o', color=color, markersize=8, 
+                markeredgecolor='black', markeredgewidth=1)
+        
+        # Plot random baseline if available and requested
+        if show_random_baseline and f'random_{split}' in pr_curves[concept]:
+            random_data = pr_curves[concept][f'random_{split}']
+            if random_data and 'precision' in random_data and len(random_data['precision']) > 0:
+                random_precision = random_data['precision']
+                random_recall = random_data['recall']
+                
+                if len(random_recall) > window_size:
+                    # Apply smoothing to random baseline
+                    random_recall_smooth = uniform_filter1d(random_recall, size=window_size, mode='nearest')
+                    random_precision_smooth = uniform_filter1d(random_precision, size=window_size, mode='nearest')
+                    
+                    # Sort by recall
+                    sort_idx_random = np.argsort(-random_recall_smooth)
+                    random_recall_smooth = random_recall_smooth[sort_idx_random]
+                    random_precision_smooth = random_precision_smooth[sort_idx_random]
+                    
+                    plt.plot(random_recall_smooth, random_precision_smooth, '--', color=color, 
+                            linewidth=1.5, alpha=0.5)
+                else:
+                    plt.plot(random_recall, random_precision, '--', color=color, 
+                            linewidth=1.5, alpha=0.5)
+    
+    if not has_valid_data:
+        plt.text(0.5, 0.5, f'No {split} data available', 
+                transform=plt.gca().transAxes, ha='center', va='center', fontsize=16)
+    
+    # Add F1 score isolines
+    f1_lines = np.array([0.2, 0.4, 0.6, 0.8])
+    for f1_score in f1_lines:
+        min_recall = f1_score / 2 + 0.01
+        x = np.linspace(min_recall, 1, 500)
+        y = f1_score * x / (2 * x - f1_score)
+        valid_mask = y <= 1
+        if np.any(valid_mask):
+            plt.plot(x[valid_mask], y[valid_mask], '--', color='gray', alpha=0.3, linewidth=1)
+            label_idx = len(x[valid_mask]) * 3 // 4
+            if label_idx < len(x[valid_mask]):
+                # Adjust offsets based on F1 score to avoid overlap
+                if f1_score == 0.8:
+                    x_offset = -0.09  # Was -0.11, moved right by 0.02
+                    y_offset = 0.07  # Was 0.06, moved up by 0.01
+                elif f1_score == 0.6:
+                    x_offset = -0.03  # Was -0.05, moved right by 0.02
+                    y_offset = 0.02
+                elif f1_score == 0.4:
+                    x_offset = 0.01  # Was -0.01, moved right by 0.02
+                    y_offset = 0.02
+                else:  # f1_score == 0.2
+                    x_offset = 0.04  # Was 0.02, moved right by 0.02
+                    y_offset = 0.02
+                    
+                plt.text(x[valid_mask][label_idx] + x_offset, 
+                        y[valid_mask][label_idx] + y_offset, 
+                        f'F1={f1_score}', fontsize=8, color='gray', alpha=0.7, 
+                        rotation=0, ha='center', va='bottom')
+    
+    # Formatting
+    plt.xlabel('Recall', fontsize=label_font_size)
+    plt.ylabel('Precision', fontsize=label_font_size)
+    plt.grid(True, alpha=0.3)
+    plt.xlim([0, 1.05])
+    plt.ylim([0, 1.05])
+    
+    # Set tick label font size to match legend font
+    plt.tick_params(axis='both', which='major', labelsize=legend_font)
+    
+    # Set ticks every 0.25 on both axes, but don't show 0
+    ticks = np.arange(0, 1.25, 0.25)
+    tick_labels = ['' if t == 0 else f'{t:.2f}'.rstrip('0').rstrip('.') for t in ticks]
+    plt.xticks(ticks, tick_labels)
+    plt.yticks(ticks, tick_labels)
+    
+    # Add legend to the main plot
+    if has_valid_data and len(concepts) <= 15:  # Only create legend if not too many concepts
+        # Get handles and labels from the main plot
+        handles, labels = plt.gca().get_legend_handles_labels()
+        
+        # Add explanation for the circles
+        circle_legend = Line2D([0], [0], marker='o', color='w', markerfacecolor='white', 
+                              markeredgecolor='black', markersize=8)
+        handles.append(circle_legend)
+        labels.append('Max F1')
+        
+        # Add legend - place in top right if 'med' is in save_path, otherwise bottom left
+        if save_path and 'med' in save_path:
+            legend_loc = 'upper right'
+        else:
+            legend_loc = 'lower left'
+        plt.legend(handles, labels, loc=legend_loc, 
+                   fontsize=legend_font, frameon=True, fancybox=True, shadow=False)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    plt.show()
+
+
+def plot_precision_recall_curves(pr_curves, optimal_thresholds, concepts=None, split='train', save_path=None):
+    """
+    Plots precision-recall curves with optimal F1 points marked.
+    
+    Args:
+        pr_curves (dict): PR curve data from compute_pr_curves_and_optimal_thresholds_gpu
+        optimal_thresholds (dict): Optimal threshold data with F1 scores
+        concepts (list, optional): List of concepts to plot. If None, plots all.
+        split (str): Which split to plot ('train' or 'test')
+        save_path (str, optional): Path to save the figure
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    
+    if concepts is None:
+        concepts = list(pr_curves.keys())
+    
+    num_concepts = len(concepts)
+    fig, axes = plt.subplots(nrows=(num_concepts + 1) // 2, ncols=2, figsize=(12, 5 * ((num_concepts + 1) // 2)))
+    
+    if num_concepts == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    # Hide extra subplots if odd number of concepts
+    if num_concepts % 2 == 1:
+        axes[-1].set_visible(False)
+    
+    for idx, concept in enumerate(concepts):
+        ax = axes[idx]
+        
+        # Get PR curve data for the selected split
+        if split not in pr_curves[concept] or not pr_curves[concept][split]:
+            # Skip if split data doesn't exist
+            ax.text(0.5, 0.5, f'No {split} data available', 
+                   transform=ax.transAxes, ha='center', va='center')
+            ax.set_title(f'{concept.capitalize()} - No {split} data')
+            continue
+            
+        pr_data = pr_curves[concept][split]
+        precision = pr_data['precision']
+        recall = pr_data['recall']
+        f1_scores = pr_data['f1']
+        optimal_idx = pr_data['optimal_idx']
+        
+        # Plot PR curve
+        ax.plot(recall, precision, 'b-', linewidth=2, label='PR Curve')
+        
+        # Mark optimal F1 point
+        opt_recall = recall[optimal_idx]
+        opt_precision = precision[optimal_idx]
+        opt_f1 = f1_scores[optimal_idx]
+        
+        ax.plot(opt_recall, opt_precision, 'ro', markersize=10, 
+                label=f'Optimal F1={opt_f1:.3f}')
+        
+        # Add diagonal F1 score lines
+        f1_lines = np.array([0.2, 0.4, 0.6, 0.8])
+        for f1_score in f1_lines:
+            # Start from just above the critical point to avoid division by zero
+            min_recall = f1_score / 2 + 0.01
+            x = np.linspace(min_recall, 1, 500)
+            y = f1_score * x / (2 * x - f1_score)
+            
+            # Only plot where precision <= 1
+            valid_mask = y <= 1
+            if np.any(valid_mask):
+                ax.plot(x[valid_mask], y[valid_mask], '--', color='gray', alpha=0.3, linewidth=1)
+                
+                # Find a good position for the label (3/4 along the curve)
+                label_idx = len(x[valid_mask]) * 3 // 4
+                if label_idx < len(x[valid_mask]):
+                    ax.text(x[valid_mask][label_idx] + 0.02, 
+                           y[valid_mask][label_idx] + 0.02, 
+                           f'F1={f1_score}', fontsize=8, color='gray', alpha=0.7)
+        
+        # Formatting
+        ax.set_xlabel('Recall')
+        ax.set_ylabel('Precision')
+        ax.set_title(f'{concept.capitalize()} - PR Curve ({split.capitalize()})', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([0, 1.05])
+        ax.set_ylim([0, 1.05])
+        ax.legend(loc='lower left')
+        
+        # Add threshold info
+        threshold = optimal_thresholds[concept]['threshold']
+        ax.text(0.05, 0.95, f'Optimal Threshold: {threshold:.3f}',
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    plt.show()
+
+
+def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, plot_type="both", metric_type='Cosine Similarity', percentile=None, bins=50, concepts=None, save_path=None, vmin=None, vmax=None, ylim=None, optimal_thresholds=None, xlabel=None, f1_text_side='right', figsize=None, font_size=8, f1_font_size=None, legend_font_size=None, show_xticks=True):
     """
     Plots histograms of cosine similarity values for each concept using precomputed statistics.
 
@@ -2587,11 +3450,37 @@ def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, pl
         plot_type (str): Option to plot "train", "test", or "both" datasets.
         percentile (float, optional): Percentile value for threshold line.
         bins (int): Number of bins for the histogram.
+        vmin (float or list, optional): Minimum x-axis value. Can be a single value for all plots or a list corresponding to concepts.
+        vmax (float or list, optional): Maximum x-axis value. Can be a single value for all plots or a list corresponding to concepts.
+        ylim (float or list, optional): Maximum y-axis value. Can be a single value for all plots or a list corresponding to concepts.
+        optimal_thresholds (dict, optional): Dictionary with optimal thresholds from compute_cossim_hist_stats.
+                                           Expected structure: {concept: {'threshold': float, ...}}
+        f1_text_side (str): Side to place F1 text relative to threshold line ('left' or 'right')
+        figsize (tuple, optional): Figure size as (width, height). If None, defaults to (5.5, fig_height)
+                                  where fig_height is 2 for single concept or num_concepts * 2 for multiple.
+        font_size (int): Font size for plot text. Default is 8.
+        f1_font_size (int, optional): Font size for F1 score text. If None, defaults to font_size.
+        legend_font_size (int, optional): Font size for legend text. If None, defaults to font_size.
+        show_xticks (bool): Whether to show x-axis tick labels. Default is True.
 
     Returns:
         None: Displays the histograms.
     """
-    plt.rcParams.update({'font.size': 8})
+    # Apply paper plotting style if available
+    try:
+        from utils.general_utils import apply_paper_plotting_style
+        apply_paper_plotting_style()
+    except ImportError:
+        pass
+    
+    plt.rcParams.update({'font.size': font_size})
+    
+    # Set default f1_font_size and legend_font_size if not provided
+    if f1_font_size is None:
+        f1_font_size = font_size
+    if legend_font_size is None:
+        legend_font_size = font_size
+    
     # Extract train and test stats
     train_stats = stats['train']
     test_stats = stats['test']
@@ -2601,22 +3490,124 @@ def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, pl
         concepts = list(train_stats.keys())
     num_concepts = len(concepts)
     
-    fig, axes = plt.subplots(nrows=num_concepts, figsize=(5.5, num_concepts*2), sharex=True)
+    # Set appropriate layout and figure size - always use vertical stacking
+    if figsize is None:
+        fig_height = 2 if num_concepts == 1 else num_concepts * 1.35  # Balanced spacing
+        # Standard width since legend is now inside the first plot
+        figsize = (6, fig_height)
+    fig, axes = plt.subplots(nrows=num_concepts, figsize=figsize, sharex=False)
     if num_concepts == 1:
         axes = [axes]
+    
+    # Create legend at the top of the figure
+    from matplotlib.lines import Line2D
+    import matplotlib.patches as mpatches
+    
+    # Create legend handles based on plot type
+    legend_handles = []
+    legend_labels = []
+    
+    if plot_type in ['train', 'both']:
+        # Train handles with custom rectangle dimensions - using gray/green color scheme
+        train_out_patch = mpatches.Rectangle((0, 0), 1, 1, fc='gray', alpha=0.6)
+        train_in_patch = mpatches.Rectangle((0, 0), 1, 1, fc='green', alpha=0.7)
+        legend_handles.extend([train_out_patch, train_in_patch])
+        legend_labels.extend(['Train wo/ Concept', 'Train w/ Concept'])
+    
+    if plot_type in ['test', 'both']:
+        # Test handles with custom rectangle dimensions - using gray/green color scheme
+        test_out_patch = mpatches.Rectangle((0, 0), 1, 1, fc='gray', alpha=0.6)
+        test_in_patch = mpatches.Rectangle((0, 0), 1, 1, fc='green', alpha=0.7)
+        legend_handles.extend([test_out_patch, test_in_patch])
+        legend_labels.extend(['wo/ Concept', 'w/ Concept'])
+    
+    # Note: Best threshold line is shown in the plot but not in the legend
+    
+    # Create custom legend handler for narrower rectangles
+    from matplotlib.legend_handler import HandlerPatch
+    class HandlerSquare(HandlerPatch):
+        def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+            # Make rectangles narrower (reduce width)
+            center_y = 0.5 * height
+            rect_height = height * 0.8  # 80% of normal height
+            rect_width = width * 0.8    # 80% of normal width (doubled from 0.4)
+            
+            p = mpatches.Rectangle((xdescent, center_y - rect_height/2), 
+                                   rect_width, rect_height,
+                                   facecolor=orig_handle.get_facecolor(),
+                                   alpha=orig_handle.get_alpha(),
+                                   transform=trans)
+            return [p]
+    
+    # Create handler map for Rectangle objects (except the invisible one)
+    handler_map = {}
+    for handle in legend_handles:
+        if isinstance(handle, mpatches.Rectangle) and handle.get_edgecolor() != 'none':
+            handler_map[handle] = HandlerSquare()
+    
+    # Add legend at the very top of the figure
+    fig.legend(legend_handles, legend_labels, loc='upper center', 
+               bbox_to_anchor=(0.5, 0.99), ncol=len(legend_handles), 
+               frameon=True, fontsize=legend_font_size, 
+               edgecolor='gray', fancybox=True,
+               handler_map=handler_map,
+               handletextpad=0.1,
+               columnspacing=1.0)
+    
+    # Define color scheme for optimal thresholds - matching PR curves
+    if num_concepts <= 4:
+        threshold_colors = ['green', 'purple', 'chocolate', 'deeppink']
+    else:
+        # For more than 4 concepts, cycle through the colors
+        base_colors = ['green', 'purple', 'chocolate', 'deeppink']
+        threshold_colors = [base_colors[i % 4] for i in range(num_concepts)]
         
-    # Define KDE plotting helper
+    # Define KDE plotting helper with optimization for large datasets
     from scipy.stats import gaussian_kde
     def plot_kde(data, color, label):
         if len(data) > 1 and np.std(data) > 0:
-            kde = gaussian_kde(data)
-            xs = np.linspace(vmin if vmin is not None else min(data) - 0.01,
-                             vmax if vmax is not None else max(data) + 0.01, 300)
-            # ax.plot(xs, kde(xs), color=color, label=label)
+            # Downsample if data is too large (for faster KDE computation)
+            max_samples = 10000  # Limit samples for KDE
+            if len(data) > max_samples:
+                # Random sample without replacement
+                indices = np.random.choice(len(data), max_samples, replace=False)
+                data_sample = [data[i] for i in indices]
+            else:
+                data_sample = data
+            
+            # Use Scott's rule for bandwidth selection (faster than default)
+            kde = gaussian_kde(data_sample, bw_method='scott')
+            
+            # Reduce resolution for very large datasets
+            n_points = 150 if len(data) > 50000 else 300
+            # Always use full data range for KDE computation
+            xs = np.linspace(min(data) - 0.01, max(data) + 0.01, n_points)
+            # Plot filled area
             ax.fill_between(xs, 0, kde(xs), color=color, alpha=0.6, label=label)
 
     for i, concept in enumerate(concepts):
         ax = axes[i]
+        
+        # Get concept-specific vmin/vmax
+        if isinstance(vmin, list):
+            concept_vmin = vmin[i] if i < len(vmin) else None
+        else:
+            concept_vmin = vmin
+            
+        if isinstance(vmax, list):
+            concept_vmax = vmax[i] if i < len(vmax) else None
+        else:
+            concept_vmax = vmax
+            
+        # Get concept-specific ylim
+        if isinstance(ylim, list):
+            concept_ylim = ylim[i] if i < len(ylim) else None
+        else:
+            concept_ylim = ylim
+        
+        # Print progress for large datasets
+        if num_concepts > 5:
+            print(f"Plotting concept {i+1}/{num_concepts}: {concept}")
 
         # Retrieve similarity values
         in_concept_sims_train = train_stats[concept]['in_concept_sims']
@@ -2632,38 +3623,222 @@ def plot_cosine_similarity_histograms(stats, concept_thresholds, sample_type, pl
 #         if plot_type in {"both", "test"}:
 #             ax.hist(out_concept_sims_test, bins=bins, alpha=0.5, color='blue', label='Out-of-Concept', density=True)
 #             ax.hist(in_concept_sims_test, bins=bins, alpha=0.5, color='red', label='In-Concept', density=True)
-        # Plot KDE curves
+        # Plot KDE curves with updated colors to match plot_activation_distributions_grid
         if plot_type in {"both", "train"}:
-            plot_kde(out_concept_sims_train, 'lightblue', 'Train - Out-of-Concept')
-            plot_kde(in_concept_sims_train, 'lightcoral', 'Train - In-Concept')
+            plot_kde(out_concept_sims_train, 'gray', 'Train - Out-of-Concept')
+            plot_kde(in_concept_sims_train, 'green', 'Train - In-Concept')
 
         if plot_type in {"both", "test"}:
-            plot_kde(out_concept_sims_test, 'blue', 'Out-of-Concept')
-            plot_kde(in_concept_sims_test, 'red', 'In-Concept')
+            plot_kde(out_concept_sims_test, 'gray', 'Out-of-Concept')
+            plot_kde(in_concept_sims_test, 'green', 'In-Concept')
 
         # Set labels and title
-        ax.set_xlabel(metric_type)
-        # ax.set_ylabel(f'{sample_type.capitalize()} {"Density"}')
-        ax.set_title(f'{concept.capitalize()}', fontstyle='italic')
-        ax.grid(True, linestyle='--', alpha=0.5)
+        # Show xlabel only on last subplot (bottom)
+        if i == num_concepts - 1:
+            if xlabel is not None:
+                ax.set_xlabel(xlabel)
+            else:
+                ax.set_xlabel(metric_type)
+        # Set concept name as title on top, using only text after :: if present
+        display_concept = concept.split('::')[-1] if '::' in concept else concept
+        ax.set_title(f'{display_concept.capitalize()}', fontstyle='italic', pad=3)
+        
+        # Add grid like plot_activation_distributions_grid
+        ax.grid(True, alpha=0.3)
 
         # Plot percentile threshold if available
-        if percentile is not None and concept in concept_thresholds:
-            ax.axvline(concept_thresholds[concept][0], color='green', linestyle='--', linewidth=2, label=f'{percentile:.2f}% Threshold')
+        if percentile is not None:
+            # Handle nested format {percentile: {concept: (threshold, random)}}
+            if isinstance(concept_thresholds, dict) and percentile in concept_thresholds:
+                if concept in concept_thresholds[percentile]:
+                    threshold_value = concept_thresholds[percentile][concept][0]
+                    ax.axvline(threshold_value, color='green', linestyle='--', linewidth=2, label=f'{percentile*100:.0f}% Threshold')
+            # Handle flat format {concept: (threshold, random)}
+            elif concept in concept_thresholds:
+                threshold_value = concept_thresholds[concept][0]
+                ax.axvline(threshold_value, color='green', linestyle='--', linewidth=2, label=f'{percentile*100:.0f}% Threshold')
         
-        # Force x-axis tick labels
-        ax.xaxis.set_tick_params(labelbottom=True)
+        # Plot optimal threshold if available
+        if optimal_thresholds is not None and concept in optimal_thresholds:
+            opt_threshold = optimal_thresholds[concept]['threshold']
+            # Use concept-specific color
+            threshold_color = threshold_colors[i] if i < len(threshold_colors) else 'green'
+            # Don't add label here - we'll handle it in the legend
+            ax.axvline(opt_threshold, color=threshold_color, linestyle='-', linewidth=2)
+        
+        # Control x-axis tick labels based on parameter
+        if show_xticks:
+            ax.xaxis.set_tick_params(labelbottom=True)
+        else:
+            ax.xaxis.set_tick_params(labelbottom=False)
+            ax.set_xticks([])  # Remove tick marks as well
         ax.set_yticks([])
         
+        # Apply tick params styling to match plot_activation_distributions_grid
+        ax.tick_params(labelsize=10)
+        
+        ax.set_xlim([concept_vmin, concept_vmax])
+        if concept_ylim is not None:
+            ax.set_ylim(bottom=0, top=concept_ylim)
+        else:
+            ax.set_ylim(bottom=0)  # Ensure histogram starts at bottom of plot
+            
+        # Add F1 score annotation after ylim is set
+        if optimal_thresholds is not None and concept in optimal_thresholds:
+            opt_threshold = optimal_thresholds[concept]['threshold']
+            f1_score = optimal_thresholds[concept].get('train_f1' if plot_type == 'train' else 'test_f1', 0)
+            # Determine if optimal line is more than 2/3 through the plot
+            x_range = concept_vmax - concept_vmin if concept_vmin is not None and concept_vmax is not None else ax.get_xlim()[1] - ax.get_xlim()[0]
+            x_min = concept_vmin if concept_vmin is not None else ax.get_xlim()[0]
+            threshold_position = (opt_threshold - x_min) / x_range
+            
+            # Automatically decide text side: if threshold is > 2/3 through plot, put text on left
+            auto_f1_text_side = 'left' if threshold_position > 2/3 else f1_text_side
+            
+            # Position text based on auto_f1_text_side
+            if auto_f1_text_side == 'left':
+                text_x = opt_threshold - 0.02  # Much closer when on left
+                ha = 'right'
+            else:  # 'right'
+                text_x = opt_threshold + 0.12  # Even farther from line
+                ha = 'left'
+            # Position text just below the top of the plot
+            y_top = ax.get_ylim()[1]
+            text_y = y_top - (y_top * 0.20)  # 20% below the top
+            ax.text(text_x, text_y, f'F1$_{{\\mathrm{{max}}}}$={f1_score:.2f}',
+                   rotation=0, verticalalignment='center', horizontalalignment=ha, 
+                   color=threshold_color, fontsize=f1_font_size)
+
+        # Legend is now at the figure level, not subplot level
+
+    plt.subplots_adjust(left=0.1, right=0.95, top=0.78, bottom=0.02, hspace=0.35)  # Leave 22% at top for legend
+    
+    if save_path:
+        plt.savefig(save_path, dpi=500, format='pdf')
+        
+    plt.show()
+
+
+def plot_cosine_similarity_histograms_overlay(stats, concept_thresholds, sample_type, plot_type="test", 
+                                             metric_type='Cosine Similarity', percentile=None, 
+                                             concepts=None, save_path=None, vmin=None, vmax=None, 
+                                             optimal_thresholds=None, xlabel=None):
+    """
+    Plots overlaid histograms of cosine similarity values for multiple concepts on a single plot.
+    Uses warm colors for in-concept and cool colors for out-of-concept distributions.
+    
+    Args:
+        stats (dict): Dictionary containing in-sample and out-of-sample cosine similarity stats
+        concept_thresholds (dict): Dictionary mapping concepts to (threshold, random_threshold)
+        sample_type (str): Label for the sample type (e.g., "patch" or "image")
+        plot_type (str): Option to plot "train", "test", or "both" datasets
+        metric_type (str): Type of metric being plotted
+        percentile (float, optional): Percentile value for threshold line
+        concepts (list, optional): List of concepts to plot. If None, plots all
+        save_path (str, optional): Path to save the figure
+        vmin (float, optional): Minimum x-axis value
+        vmax (float, optional): Maximum x-axis value
+        optimal_thresholds (dict, optional): Dictionary with optimal thresholds
+        xlabel (str, optional): Custom x-axis label
+    """
+    plt.rcParams.update({'font.size': 10})
+    
+    # Extract train and test stats
+    train_stats = stats['train']
+    test_stats = stats['test']
+    
+    # Use the keys from the train split
+    if not concepts:
+        concepts = list(train_stats.keys())
+    num_concepts = len(concepts)
+    
+    # Create single figure
+    fig, ax = plt.subplots(figsize=(5.5, 4))
+    
+    # Define color palettes
+    # Warm colors for in-concept (reds, oranges, yellows)
+    warm_colors = plt.cm.YlOrRd(np.linspace(0.3, 0.9, num_concepts))
+    # Cool colors for out-of-concept (blues, greens, purples)
+    cool_colors = plt.cm.YlGnBu(np.linspace(0.3, 0.9, num_concepts))
+    
+    # Define KDE plotting helper with optimization
+    from scipy.stats import gaussian_kde
+    def plot_kde(data, color, label, linestyle='-', alpha=0.6):
+        if len(data) > 1 and np.std(data) > 0:
+            # Downsample if data is too large
+            max_samples = 10000
+            if len(data) > max_samples:
+                indices = np.random.choice(len(data), max_samples, replace=False)
+                data_sample = [data[i] for i in indices]
+            else:
+                data_sample = data
+            
+            kde = gaussian_kde(data_sample, bw_method='scott')
+            
+            n_points = 150 if len(data) > 50000 else 300
+            xs = np.linspace(vmin if vmin is not None else min(data) - 0.01,
+                           vmax if vmax is not None else max(data) + 0.01, n_points)
+            
+            # Plot as line instead of fill for clarity with multiple overlays
+            ax.plot(xs, kde(xs), color=color, label=label, linewidth=2, 
+                   linestyle=linestyle, alpha=alpha)
+    
+    # Plot each concept
+    for i, concept in enumerate(concepts):
+        # Retrieve similarity values
+        in_concept_sims_train = train_stats[concept]['in_concept_sims']
+        out_concept_sims_train = train_stats[concept]['out_concept_sims']
+        in_concept_sims_test = test_stats[concept]['in_concept_sims']
+        out_concept_sims_test = test_stats[concept]['out_concept_sims']
+        
+        # Plot based on plot_type
+        if plot_type == "train":
+            plot_kde(in_concept_sims_train, warm_colors[i], f'{concept.capitalize()} (in)', '-', 0.8)
+            plot_kde(out_concept_sims_train, cool_colors[i], f'{concept.capitalize()} (out)', '-', 0.8)
+        elif plot_type == "test":
+            plot_kde(in_concept_sims_test, warm_colors[i], f'{concept.capitalize()} (in)', '-', 0.8)
+            plot_kde(out_concept_sims_test, cool_colors[i], f'{concept.capitalize()} (out)', '-', 0.8)
+        elif plot_type == "both":
+            # Use solid for test, dashed for train
+            plot_kde(in_concept_sims_test, warm_colors[i], f'{concept.capitalize()} (in-test)', '-', 0.8)
+            plot_kde(out_concept_sims_test, cool_colors[i], f'{concept.capitalize()} (out-test)', '-', 0.8)
+            plot_kde(in_concept_sims_train, warm_colors[i], f'{concept.capitalize()} (in-train)', '--', 0.6)
+            plot_kde(out_concept_sims_train, cool_colors[i], f'{concept.capitalize()} (out-train)', '--', 0.6)
+        
+        # Plot optimal threshold if available
+        if optimal_thresholds is not None and concept in optimal_thresholds:
+            opt_threshold = optimal_thresholds[concept]['threshold']
+            ax.axvline(opt_threshold, color=warm_colors[i], linestyle=':', linewidth=1.5, alpha=0.7)
+            
+            # Add concept name near threshold
+            y_pos = ax.get_ylim()[1] * (0.9 - i * 0.1)  # Stagger labels vertically
+            ax.text(opt_threshold + 0.01, y_pos, concept.capitalize(), 
+                   rotation=0, verticalalignment='center', color=warm_colors[i], 
+                   fontsize=8, fontweight='bold')
+    
+    # Set labels and title
+    if xlabel is not None:
+        ax.set_xlabel(xlabel)
+    else:
+        ax.set_xlabel(metric_type)
+    ax.set_ylabel('Density')
+    
+    title = f'Concept Similarity Distributions ({plot_type.capitalize()})'
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.3)
+    
+    if vmin is not None and vmax is not None:
         ax.set_xlim([vmin, vmax])
-
-        ax.legend(loc='upper left')
-
+    
+    # Legend
+    if num_concepts <= 6:  # Only show legend if not too many concepts
+        ax.legend(loc='upper right', fontsize=8, ncol=2)
+    
     plt.tight_layout()
     
     if save_path:
-        plt.savefig(save_path, dpi=500, format='pdf', bbox_inches='tight')
-        
+        plt.savefig(save_path, dpi=300, format='pdf', bbox_inches='tight')
+    
     plt.show()
 
 
@@ -3186,7 +4361,7 @@ def compute_detection_metrics_over_percentiles(percentiles, gt_images_per_concep
         # Find activated images with vectorized operations
         activated_images_split = defaultdict(set)
         
-        if 'kmeans' not in con_label:
+        if 'kmeans' not in con_label and 'sae' not in con_label:
             # Supervised: direct concept mapping with vectorized operations
             for concept, (threshold, _) in curr_thresholds.items():
                 if str(concept) in concept_columns:

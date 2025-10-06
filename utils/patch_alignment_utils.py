@@ -358,11 +358,14 @@ def compute_patch_similarities_to_vector(image_index, concept_label,
 def compute_heatmaps_for_concept(concept_label, my_image_indices, cos_sims, dataset_name, con_label, top_n, model_input_size):
     """
     Computes heatmaps for a given concept by calculating patch similarities across specified images.
+    
+    Note: This function uses precomputed cosine similarities from cos_sims (ChunkedActivationLoader),
+    so embeddings are not needed - the similarities have already been computed and stored.
 
     Args:
         concept_label (str): The label of the concept for which heatmaps are generated.
         my_image_indices (list): A list of indices representing the images to process.
-        cos_sims (ChunkedActivationLoader): Loader containing cosine similarity values for the patches.
+        cos_sims (ChunkedActivationLoader): Loader containing precomputed cosine similarity values for the patches.
         dataset_name (str): The name of the dataset (used for saving the heatmaps).
         con_label (str): A label or identifier for the concept, typically used in filenames.
         top_n (int): Number of top images (unused in this function but kept for compatibility).

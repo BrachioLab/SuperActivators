@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath("../utils"))
 import torch
 
 from compute_concepts_utils import compute_signed_distances

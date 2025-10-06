@@ -3,7 +3,7 @@ import pandas as pd
 import sys
 from tqdm import tqdm
 import os
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath("../utils"))
 
 from superdetector_inversion_utils import find_all_superdetector_patches
 from quant_concept_evals_utils import compute_detection_metrics_over_percentiles
@@ -33,9 +33,9 @@ if __name__ == "__main__":
                 cos_sims = pd.read_csv(f"{SCRATCH_DIR}Cosine_Similarities/{DATASET_NAME}/{COSSIM_FILE}")
 
                 gt_patches_per_concept_test= \
-                    torch.load(f'GT_Samples/{DATASET_NAME}/gt_patch_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
+                    torch.load(f'../GT_Samples/{DATASET_NAME}/gt_patch_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
                 gt_images_per_concept_test= \
-                    torch.load(f'GT_Samples/{DATASET_NAME}/gt_samples_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
+                    torch.load(f'../GT_Samples/{DATASET_NAME}/gt_samples_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
                 if SAMPLE_TYPE == 'patch':
                     gt_samples_per_concept_test = gt_patches_per_concept_test
                 elif SAMPLE_TYPE == 'cls':
@@ -62,8 +62,8 @@ if __name__ == "__main__":
                     CON_LABEL = f"{MODEL_NAME}_linsep_{SAMPLE_TYPE}_embeddings_BD_{BALANCE_DATA}_BN_{BALANCE_NEGATIVES}_percentthrumodel_100"
                     DISTS_FILE = f'dists_{CONCEPTS_FILE[:-3]}.csv'
 
-                    gt_patches_per_concept_test = torch.load(f'GT_Samples/{DATASET_NAME}/gt_patch_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
-                    gt_images_per_concept_test = torch.load(f'GT_Samples/{DATASET_NAME}/gt_samples_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
+                    gt_patches_per_concept_test = torch.load(f'../GT_Samples/{DATASET_NAME}/gt_patch_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
+                    gt_images_per_concept_test = torch.load(f'../GT_Samples/{DATASET_NAME}/gt_samples_per_concept_test_inputsize_{MODEL_INPUT_SIZE}.pt')
 
 
                     dists = pd.read_csv(f"{SCRATCH_DIR}Distances/{DATASET_NAME}/{DISTS_FILE}")

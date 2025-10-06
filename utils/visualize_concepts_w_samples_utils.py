@@ -8,18 +8,17 @@ from matplotlib.colors import Normalize
 import matplotlib.patches as mpatches
 import math
 import ast
+from tqdm import tqdm
 
 import torch.nn.functional as F
 import torch
 
-import importlib
-import general_utils
-importlib.reload(general_utils)
-import patch_alignment_utils
-importlib.reload(patch_alignment_utils)
+import sys
+import os
+sys.path.append(os.path.abspath(".."))
 
-from general_utils import retrieve_image, get_split_df, pad_or_resize_img, load_images, create_image_loader_function
-from patch_alignment_utils import compute_patches_per_image, calculate_patch_location, compute_patch_similarities_to_vector, get_image_idx_from_global_patch_idx, get_patch_split_df, calculate_patch_indices
+from utils.general_utils import retrieve_image, get_split_df, pad_or_resize_img, load_images, create_image_loader_function
+from utils.patch_alignment_utils import compute_patches_per_image, calculate_patch_location, compute_patch_similarities_to_vector, get_image_idx_from_global_patch_idx, get_patch_split_df, calculate_patch_indices, filter_patches_by_image_presence
 
 ######### only when there's gt labels #########
 def get_user_category(concept_columns):
@@ -245,13 +244,32 @@ def make_image_with_highlighted_patch(image, left, top, right, bottom, model_inp
     """
     # Resize the image to match the embedding process
     resized_image = pad_or_resize_img(image, model_input_size)
-
-    # Draw the rectangle on the resized image
-    image_with_patch = resized_image.copy()
+    
+    # Convert to numpy for cropping if needed
+    image_np = np.array(resized_image.convert('RGB'))
+    
+    # Only crop for LLAMA (560x560), not for CLIP (224x224)
+    if model_input_size == (224, 224):
+        display_image = image_np
+    else:
+        # Crop to remove padding for LLAMA
+        display_image = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+    
+    # Convert back to PIL
+    image_with_patch = Image.fromarray(display_image)
     if grayscale:
-        image_with_patch = image_with_patch.convert('L').convert('RGB') 
+        image_with_patch = image_with_patch.convert('L').convert('RGB')
+    
+    # Draw the rectangle on the image
     draw = ImageDraw.Draw(image_with_patch)
-    draw.rectangle([left, top, right, bottom], outline="blue", width=5)
+    
+    # Check if patch is within bounds for LLAMA
+    if model_input_size != (224, 224):
+        crop_height = display_image.shape[0]
+        if bottom <= crop_height:
+            draw.rectangle([left, top, right, bottom], outline="blue", width=5)
+    else:
+        draw.rectangle([left, top, right, bottom], outline="blue", width=5)
 
     if plot_image_title is not None:
         plt.imshow(image_with_patch)
@@ -308,16 +326,37 @@ def plot_patches_w_corr_images(patch_indices, concept_cos_sims, images, overall_
         axes[0, i].set_title(f'Image {image_idx}')
         axes[0, i].axis('off')
 
-        # Crop the patch from the resized image
+        # Resize and prepare image for display
         resized_image = pad_or_resize_img(image, model_input_size)
-        patch = resized_image.crop((left, top, right, bottom))
-
-        # Plot the cropped patch
-        axes[1, i].imshow(patch)
+        image_np = np.array(resized_image.convert("RGB"))
+        
+        # Only crop for LLAMA (560x560), not for CLIP (224x224)
+        if model_input_size == (224, 224):
+            display_image = image_np
+        else:
+            # Crop to remove padding for LLAMA
+            display_image = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+        
+        # Convert back to PIL for drawing
+        display_image_pil = Image.fromarray(display_image)
+        draw = ImageDraw.Draw(display_image_pil)
+        
+        # Draw rectangle around patch
+        if model_input_size != (224, 224):
+            # For cropped images, check if patch is within bounds
+            crop_height = display_image.shape[0]
+            if bottom <= crop_height:
+                draw.rectangle([left, top, right, bottom], outline="red", width=3)
+        else:
+            draw.rectangle([left, top, right, bottom], outline="red", width=3)
+        
+        # Show the image with highlighted patch
+        axes[1, i].imshow(display_image_pil)
         try:
             axes[1, i].set_title(f'Patch {patch_idx} ({metric_type}: {concept_cos_sims[patch_idx]:.2f})')
         except:
             axes[1, i].set_title(f'Patch {patch_idx} ({metric_type}: {concept_cos_sims.iloc[patch_idx]:.2f})')
+        
         axes[1, i].axis('off')
 
     plt.tight_layout()
@@ -1810,21 +1849,102 @@ def plot_binarized_patchsims_with_raw_heatmaps(
     concept_labels, heatmaps, image_index, images,
     thresholds_dict, metric_type, model_input_size, 
     dataset_name, save_file=None, 
-    nonconcept_thresholds=False, vmin=None, vmax=None):
+    nonconcept_thresholds=False, vmin=None, vmax=None,
+    show_colorbar_ticks=True, seg_concept=None):
 
     percentiles = list(thresholds_dict.keys())
     num_thresholds = len(percentiles)
     num_concepts = len(concept_labels)
 
-    plt.rcParams.update({'font.size': 8})
-    fig, axes = plt.subplots(num_concepts, num_thresholds + 2, figsize=(5.5, num_concepts * 0.75), constrained_layout=True)
+    # Clean matplotlib styling
+    plt.rcParams.update({'font.size': 10})
+    
+    # Create grid layout: rows = concepts, cols = original + heatmap + percentiles
+    num_concepts = len(concept_labels)
+    num_cols = 2 + len(percentiles)  # Original, heatmap, then percentiles
+    
+    # Create figure with grid
+    fig_width = 2.5 * num_cols  # Width per column
+    fig_height = 2.5 * num_concepts  # Height per row
+    fig, axes = plt.subplots(num_concepts, num_cols, figsize=(fig_width, fig_height),
+                            gridspec_kw={'wspace': 0.1, 'hspace': 0.1})
+    
+    # Handle single row/column cases
     if num_concepts == 1:
-        axes = np.expand_dims(axes, axis=0)
+        axes = axes.reshape(1, -1)
+    if num_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    # Set white background
+    fig.patch.set_facecolor('white')
 
-    image = images[image_index]
+    # Load segmentations if needed (using efficient loader)
+    concept_mask = None
+    if seg_concept is not None and 'Broden' in dataset_name:
+        from utils.segmentation_loader import get_concept_segmentation
+        concept_mask = get_concept_segmentation(dataset_name, image_index, seg_concept)
+    
+    # Load image internally if not provided
+    if images is None:
+        image = retrieve_image(image_index, dataset_name)
+    else:
+        image = images[image_index]
     resized_image = pad_or_resize_img(image, model_input_size)
     image_np = np.array(resized_image.convert("RGB")) / 255.0
-    image_cropped = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+    
+    # Create separate images: one with segmentation for original, one clean for heatmaps
+    image_np_clean = image_np.copy()  # Clean version for heatmaps and overlays
+    image_np_with_seg = image_np.copy()  # Version with segmentation for original image only
+    
+    # Apply segmentation overlay only to the segmentation version
+    if concept_mask is not None:
+        try:
+            from utils.general_utils import pad_or_resize_img_tensor
+            from scipy import ndimage
+            
+            # Resize mask to match image size
+            if isinstance(concept_mask, torch.Tensor):
+                resized_mask = pad_or_resize_img_tensor(concept_mask, model_input_size, is_mask=True)
+                overlay_mask = resized_mask.cpu().numpy()
+            else:
+                overlay_mask = concept_mask
+            
+            # Apply thick yellow outline only to the segmentation version
+            if overlay_mask is not None:
+                # Create thicker outline by dilating multiple times
+                dilated_mask = overlay_mask.copy()
+                for _ in range(12):  # Apply dilation 12 times for much thicker outline (2x previous)
+                    dilated_mask = ndimage.binary_dilation(dilated_mask)
+                edges = dilated_mask & ~overlay_mask
+                
+                # Also add edge detection to include boundaries at image edges
+                # Create a boundary mask for edges of the image
+                h, w = overlay_mask.shape
+                edge_mask = np.zeros_like(overlay_mask, dtype=bool)
+                edge_width = 12  # Same thickness as dilation
+                edge_mask[:edge_width, :] = True
+                edge_mask[-edge_width:, :] = True
+                edge_mask[:, :edge_width] = True
+                edge_mask[:, -edge_width:] = True
+                
+                # Include edges that touch the image boundary
+                edges_at_boundary = edge_mask & dilated_mask
+                edges = edges | edges_at_boundary
+                
+                # Apply yellow outline only to the segmentation version
+                image_np_with_seg[edges == 1] = [1.0, 1.0, 0.0]  # Yellow color (normalized)
+        except Exception as e:
+            print(f"Warning: Could not apply segmentation overlay: {e}")
+    elif seg_concept is not None and 'Broden' in dataset_name:
+        print(f"Warning: Segmentation concept '{seg_concept}' not found in image {image_index}")
+    
+    # Only crop for LLAMA (560x560), not for CLIP (224x224)
+    if model_input_size == (224, 224):
+        image_cropped_clean = image_np_clean
+        image_cropped_with_seg = image_np_with_seg
+    else:
+        image_cropped_clean = top_left_crop_to_original_aspect(image_np_clean, image.size, resized_image.size)
+        image_cropped_with_seg = top_left_crop_to_original_aspect(image_np_with_seg, image.size, resized_image.size)
 
     if vmin is None or vmax is None:
         all_values = np.concatenate([
@@ -1833,71 +1953,432 @@ def plot_binarized_patchsims_with_raw_heatmaps(
         ])
         vmin, vmax = np.nanmin(all_values), np.nanmax(all_values)
 
-    colorbar_im = None
-
-    for row, concept_label in enumerate(concept_labels):
+    # First adjust the layout to get final positions
+    plt.subplots_adjust(left=0.05, right=0.88, top=0.92, bottom=0.02, wspace=0.05, hspace=0.05)
+    
+    # Now get the actual subplot positions after adjustment
+    test_ax = axes[0, 0]
+    bbox = test_ax.get_position()
+    col_width = bbox.width
+    col_spacing = axes[0, 1].get_position().x0 - (bbox.x0 + bbox.width)  # Space between columns
+    
+    # Add column headers aligned with subplot centers
+    for col_idx in range(num_cols):
+        # Calculate center position of each column accounting for spacing
+        ax_pos = axes[0, col_idx].get_position()
+        col_center_x = ax_pos.x0 + ax_pos.width / 2
+        
+        if col_idx == 0:
+            # For original image column, create label with highlighted GT concept
+            if seg_concept:
+                # Format the GT concept name
+                display_seg = seg_concept
+                if dataset_name == 'Broden-OpenSurfaces' and 'material' in seg_concept:
+                    if '::' in seg_concept:
+                        display_seg = seg_concept.split('::')[-1].capitalize()
+                
+                # Create text with partial highlighting using dynamic positioning
+                # Get approximate text widths (in figure coordinates)
+                # Using rough character width estimate
+                char_width = 0.006  # Approximate width per character at fontsize 11
+                
+                # Calculate positions based on text content
+                part1 = 'Image (GT '
+                part2 = display_seg  # Only highlight the concept name
+                part3 = ')'
+                
+                # Calculate total width to center the whole label
+                total_width = len(part1) * char_width + len(part2) * char_width + len(part3) * char_width
+                start_x = col_center_x - total_width / 2 + 0.01  # Shift slightly right
+                
+                # First part: "Image (GT "
+                text1 = fig.text(start_x + len(part1) * char_width / 2, 0.96, part1, 
+                               ha='center', va='center', fontweight='bold', fontsize=11)
+                
+                # Second part: highlighted concept name only
+                text2_x = start_x + len(part1) * char_width + len(part2) * char_width / 2
+                text2 = fig.text(text2_x, 0.96, part2, 
+                               ha='center', va='center', fontsize=11,
+                               bbox=dict(boxstyle="round,pad=0.2", facecolor='yellow', 
+                                       edgecolor='none', alpha=0.8))
+                
+                # Third part: closing parenthesis
+                text3_x = start_x + len(part1) * char_width + len(part2) * char_width + len(part3) * char_width / 2
+                text3 = fig.text(text3_x, 0.96, part3, 
+                               ha='center', va='center', fontweight='bold', fontsize=11)
+            else:
+                fig.text(col_center_x, 0.96, 'Image', 
+                        ha='center', va='center', fontweight='bold', fontsize=12)
+        elif col_idx == 1:
+            fig.text(col_center_x, 0.96, 'Heatmap', 
+                    ha='center', va='center', fontweight='bold', fontsize=12)
+        else:
+            fig.text(col_center_x, 0.96, f'{percentiles[col_idx-2]*100:.0f}%', 
+                    ha='center', va='center', fontweight='bold', fontsize=12)
+    
+    # Process each concept (row)
+    for concept_idx, concept_label in enumerate(concept_labels):
+        # Get concept display name
+        display_label = concept_label
+        if dataset_name == 'Broden-OpenSurfaces' and 'material' in concept_label:
+            if '::' in concept_label:
+                display_label = concept_label.split('::')[-1].capitalize()
+        
+        # Get the actual vertical position of this row's subplot
+        row_ax = axes[concept_idx, 0]
+        row_bbox = row_ax.get_position()
+        row_center_y = row_bbox.y0 + row_bbox.height / 2
+        
+        # Add row label (concept name) to the right of the grid in italics
+        # Position it between the last column and the colorbar
+        fig.text(0.89, row_center_y, display_label, 
+                ha='left', va='center', fontstyle='italic', fontsize=11)
+        
+        # Column 0: Original image with segmentation (only show once in top-left)
+        ax = axes[concept_idx, 0]
+        ax.axis('off')
+        
+        if concept_idx == 0:  # Only show original image in the first row
+            ax.imshow(image_cropped_with_seg)
+            ax.set_title('', fontsize=10)
+        
+        # Column 1: Raw heatmap
+        ax = axes[concept_idx, 1]
+        ax.axis('off')
+        
         heatmap = heatmaps[concept_label].detach().cpu().numpy()
         heatmap_resized = Image.fromarray(heatmap).resize(resized_image.size, resample=Image.NEAREST)
         heatmap_resized = np.array(heatmap_resized)
-        heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
-
-        # Column 0: Original image only for first row
-        if row == 0:
-            axes[0, 0].imshow(image_cropped)
-            axes[0, 0].axis('off')
-            axes[0, 0].set_title("Original")
+        
+        # Only crop for LLAMA (560x560), not for CLIP (224x224)
+        if model_input_size == (224, 224):
+            heatmap_cropped = heatmap_resized
         else:
-            axes[row, 0].axis('off')
-
-        # Column 1: Raw heatmap
-        im = axes[row, 1].imshow(heatmap_cropped, cmap='hot', interpolation='nearest', vmin=vmin, vmax=vmax)
-        axes[row, 1].axis('off')
-        if row == 0:
-            axes[row, 1].set_title("Raw Heatmap")
-        if colorbar_im is None:
-            colorbar_im = im
-
-        # Columns 2+: Threshold overlays
-        for col_idx, percentile in enumerate(percentiles):
+            heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
+        
+        im = ax.imshow(heatmap_cropped, cmap='hot', vmin=vmin, vmax=vmax)
+        
+        # Columns 2+: Binarized versions at different thresholds
+        for thresh_idx, percentile in enumerate(percentiles):
+            ax = axes[concept_idx, 2 + thresh_idx]
+            ax.axis('off')
+            
+            # Get threshold and create mask
             threshold = thresholds_dict[percentile][concept_label][0]
             mask = heatmap >= threshold if not nonconcept_thresholds else heatmap < threshold
             mask[np.isnan(heatmap)] = False
-
+            
+            # Resize mask to match image size
             mask_resized = Image.fromarray((mask * 255).astype(np.uint8)).resize(model_input_size, resample=Image.NEAREST)
             mask_resized = np.array(mask_resized) > 127
-
-            rgba_image = np.zeros((*image_np.shape[:2], 4))
-            rgba_image[mask_resized] = np.concatenate([image_np[mask_resized], np.ones((mask_resized.sum(), 1))], axis=1)
-            rgba_image[~mask_resized] = [0, 0, 0, 1]
-
-            rgba_image_cropped = top_left_crop_to_original_aspect(rgba_image, image.size, resized_image.size)
-
-            axes[row, col_idx + 2].imshow(rgba_image_cropped)
-            axes[row, col_idx + 2].axis('off')
-            if row == 0:
-                axes[row, col_idx + 2].set_title(f"{percentile * 100:.0f}%")
-
-        # Concept label on the right
-        axes[row, -1].text(1.1, 0.5, concept_label.capitalize(), va='center', ha='left',
-                           fontstyle='italic', transform=axes[row, -1].transAxes)
-
-    # Layout and vertical colorbar to the left under the original image
-    fig.subplots_adjust(
-        left=0.05, right=0.98, top=0.95, bottom=0.05,
-        wspace=0.01, hspace=0.1
-    )
-    cbar_ax = fig.add_axes([axes[0, 0].get_position().x0+0.01, axes[0, 0].get_position().y0-0.6, 0.015, 0.5])
-    fig.colorbar(colorbar_im, cax=cbar_ax, orientation='vertical', label='Cos Sim to Concept')
-    vmin, vmax = colorbar_im.get_clim()
-    tick_values = np.linspace(vmin, vmax, 3)
-    cbar_ax.set_yticks(tick_values)
-    cbar_ax.set_yticklabels([f"{t:.1f}" for t in tick_values])
-    cbar_ax.yaxis.set_ticks_position('left')
-    cbar_ax.yaxis.set_label_position('left')
-    plt.rcParams.update({'font.size': 8})
-
+            
+            # Create RGBA image showing only masked regions with black background
+            rgba_image = np.zeros((*image_np_clean.shape[:2], 4))
+            rgba_image[mask_resized] = np.concatenate([image_np_clean[mask_resized], np.ones((mask_resized.sum(), 1))], axis=1)
+            rgba_image[~mask_resized] = [0, 0, 0, 1]  # Black background for non-masked areas
+            
+            # Only crop for LLAMA (560x560), not for CLIP (224x224)
+            if model_input_size == (224, 224):
+                rgba_image_cropped = rgba_image
+            else:
+                rgba_image_cropped = top_left_crop_to_original_aspect(rgba_image, image.size, resized_image.size)
+            
+            ax.imshow(rgba_image_cropped)
+    
+    # Add colorbar on the right side of the figure
+    if show_colorbar_ticks:
+        # Create a new axis for the colorbar
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+        cb = fig.colorbar(im, cax=cbar_ax)
+        cb.set_label('Activation Strength', fontsize=10)
+        cb.ax.tick_params(labelsize=9)
+    
+    # Layout was already adjusted at the beginning, no need to do it again
+    
     if save_file:
         plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight')
+    
+    plt.show()
+
+
+def plot_image_with_concept_heatmaps(
+    concept_labels, heatmaps, image_index, images,
+    model_input_size, dataset_name, save_file=None,
+    vmin=None, vmax=None, show_colorbar_ticks=True, 
+    seg_concept=None, heatmap_alpha=1.0, font_size=14, figure_width=None, cmap='hot',
+    highlight_gt_concept=True, save_colorbar=False):
+    """
+    Plot original image with segmentation and concept heatmaps side by side.
+    
+    Args:
+        concept_labels: List of concept names
+        heatmaps: Dict mapping concept names to heatmap tensors
+        image_index: Index of the image to visualize
+        images: List of images or None (will load if None)
+        model_input_size: Tuple of (width, height) for model input
+        dataset_name: Name of the dataset
+        save_file: Path to save the figure (optional)
+        vmin/vmax: Min/max values for heatmap colorscale
+        show_colorbar_ticks: Whether to show colorbar
+        seg_concept: Ground truth concept for segmentation overlay
+        heatmap_alpha: Alpha (transparency) for heatmap overlay (0-1)
+        font_size: Base font size for text elements
+        figure_width: Total figure width in inches (height auto-calculated)
+        cmap: Colormap name for heatmaps (default: 'hot')
+        highlight_gt_concept: Whether to highlight the GT concept with yellow background
+        save_colorbar: Whether to save colorbar as separate file with _colorbar suffix
+    """
+    from utils.general_utils import get_paper_plotting_style
+    
+    num_concepts = len(concept_labels)
+    num_cols = 1 + num_concepts  # Original image + one heatmap per concept
+    
+    # Apply paper plotting style
+    plt.rcParams.update(get_paper_plotting_style())
+    # Override font size if specified
+    if font_size != 14:  # If not default
+        plt.rcParams.update({'font.size': font_size})
+    
+    # Create figure with single row
+    if figure_width is None:
+        fig_width = 3.0 * num_cols
+    else:
+        fig_width = figure_width
+    
+    # Calculate height based on width and aspect ratio
+    # Each subplot should be roughly square, plus extra space for labels
+    subplot_width = fig_width / num_cols
+    subplot_height = subplot_width  # Square subplots
+    fig_height = subplot_height * 1.3  # Add 30% for labels and padding
+    
+    fig, axes = plt.subplots(1, num_cols, figsize=(fig_width, fig_height),
+                            gridspec_kw={'wspace': 0.05, 'hspace': 0.05})
+    
+    # Handle single column case
+    if num_cols == 1:
+        axes = [axes]
+    
+    # Set white background
+    fig.patch.set_facecolor('white')
+    
+    # Load segmentations if needed
+    concept_mask = None
+    if seg_concept is not None and 'Broden' in dataset_name:
+        from utils.segmentation_loader import get_concept_segmentation
+        concept_mask = get_concept_segmentation(dataset_name, image_index, seg_concept)
+    
+    # Load image
+    if images is None:
+        image = retrieve_image(image_index, dataset_name)
+    else:
+        image = images[image_index]
+    resized_image = pad_or_resize_img(image, model_input_size)
+    image_np = np.array(resized_image.convert("RGB")) / 255.0
+    
+    # Create clean version for heatmap overlays
+    image_np_clean = image_np.copy()
+    
+    # Apply segmentation overlay only to the version for the first column
+    if concept_mask is not None:
+        try:
+            from utils.general_utils import pad_or_resize_img_tensor
+            from scipy import ndimage
+            
+            # Resize mask to match image size
+            if isinstance(concept_mask, torch.Tensor):
+                resized_mask = pad_or_resize_img_tensor(concept_mask, model_input_size, is_mask=True)
+                overlay_mask = resized_mask.cpu().numpy()
+            else:
+                overlay_mask = concept_mask
+            
+            # Apply thick yellow outline
+            if overlay_mask is not None:
+                dilated_mask = overlay_mask.copy()
+                for _ in range(12):
+                    dilated_mask = ndimage.binary_dilation(dilated_mask)
+                edges = dilated_mask & ~overlay_mask
+                
+                # Handle edges at image boundary
+                h, w = overlay_mask.shape
+                edge_mask = np.zeros_like(overlay_mask, dtype=bool)
+                edge_width = 12
+                edge_mask[:edge_width, :] = True
+                edge_mask[-edge_width:, :] = True
+                edge_mask[:, :edge_width] = True
+                edge_mask[:, -edge_width:] = True
+                
+                edges_at_boundary = edge_mask & dilated_mask
+                edges = edges | edges_at_boundary
+                
+                image_np[edges == 1] = [1.0, 1.0, 0.0]  # Yellow
+        except Exception as e:
+            print(f"Warning: Could not apply segmentation overlay: {e}")
+    
+    # Crop if needed (only for LLAMA)
+    if model_input_size == (224, 224):
+        image_cropped = image_np
+        image_cropped_clean = image_np_clean
+    else:
+        image_cropped = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+        image_cropped_clean = top_left_crop_to_original_aspect(image_np_clean, image.size, resized_image.size)
+    
+    # Compute global vmin/vmax if not provided
+    if vmin is None or vmax is None:
+        all_values = np.concatenate([
+            heatmaps[concept].detach().cpu().numpy().flatten()
+            for concept in concept_labels
+        ])
+        vmin, vmax = np.nanmin(all_values), np.nanmax(all_values)
+    
+    # Column 0: Original image with segmentation
+    ax = axes[0]
+    ax.imshow(image_cropped)
+    ax.axis('off')
+    
+    # Add title for original image above it (like the other columns)
+    if seg_concept:
+        display_seg = seg_concept
+        if dataset_name == 'Broden-OpenSurfaces' and 'material' in seg_concept:
+            if '::' in seg_concept:
+                display_seg = seg_concept.split('::')[-1].capitalize()
+        
+        if highlight_gt_concept:
+            # Top label: "Image" - will be positioned later with fig.text
+            # ax.set_title('Image', fontweight='bold', fontsize=font_size)
+            
+            # Bottom label: "(GT concept)"
+            y_pos_bottom = -0.05
+            
+            # Add prefix
+            prefix = '(GT '
+            t2 = ax.text(0.42, y_pos_bottom, prefix, transform=ax.transAxes,
+                        ha='right', va='top', fontsize=font_size)  # Same size as other labels
+            
+            # Add concept with yellow background
+            t3 = ax.text(0.64, y_pos_bottom, f'{display_seg}', transform=ax.transAxes,
+                        ha='center', va='top', 
+                        fontstyle='italic', fontsize=font_size,  # Same size as other labels
+                        bbox=dict(boxstyle='round,pad=0.05', facecolor='yellow', 
+                                 edgecolor='none', alpha=0.8))
+            
+            # Add suffix
+            t4 = ax.text(0.85, y_pos_bottom, ')', transform=ax.transAxes,
+                        ha='left', va='top', fontsize=font_size)  # Same size as other labels
+        else:
+            # Top label: "Image" - will be positioned later with fig.text
+            # ax.set_title('Image', fontweight='bold', fontsize=font_size)
+            
+            # Bottom label: "(GT concept)" without highlighting
+            ax.text(0.5, -0.05, f'(GT $\it{{{display_seg}}}$)', transform=ax.transAxes,
+                    ha='center', va='top', fontsize=font_size)
+    else:
+        # Simple centered title - will be positioned later with fig.text
+        # ax.set_title('Image', fontweight='bold', fontsize=font_size+1)
+        pass
+    
+    # Columns 1+: Heatmaps for each concept
+    for idx, concept_label in enumerate(concept_labels):
+        ax = axes[idx + 1]
+        ax.axis('off')
+        
+        # Get and process heatmap
+        heatmap = heatmaps[concept_label].detach().cpu().numpy()
+        heatmap_resized = Image.fromarray(heatmap).resize(resized_image.size, resample=Image.NEAREST)
+        heatmap_resized = np.array(heatmap_resized)
+        
+        # Crop if needed
+        if model_input_size == (224, 224):
+            heatmap_cropped = heatmap_resized
+        else:
+            heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
+        
+        # Display image with heatmap overlay (use clean version without segmentation)
+        ax.imshow(image_cropped_clean)  # Show clean image underneath
+        im = ax.imshow(heatmap_cropped, cmap=cmap, vmin=vmin, vmax=vmax, alpha=heatmap_alpha)
+        
+        # Add concept label at bottom
+        display_label = concept_label
+        if dataset_name == 'Broden-OpenSurfaces' and 'material' in concept_label:
+            if '::' in concept_label:
+                display_label = concept_label.split('::')[-1].capitalize()
+        
+        # Position label below the subplot
+        ax.text(0.5, -0.05, display_label, transform=ax.transAxes,
+                ha='center', va='top', fontsize=font_size, fontstyle='italic')
+    
+    # Adjust layout - minimal space on left, more space at bottom for labels
+    plt.subplots_adjust(left=0.02, right=0.92 if show_colorbar_ticks else 0.98, 
+                        top=0.80, bottom=0.15, wspace=0.05, hspace=0.05)
+    
+    # Add both headers at the same height using fig.text
+    # First add "Image" header
+    image_ax_pos = axes[0].get_position()
+    image_header_x = (image_ax_pos.x0 + image_ax_pos.x1) / 2
+    header_y = image_ax_pos.y1 + 0.05  # Position above the axes
+    
+    fig.text(image_header_x, header_y, 'Image', 
+            ha='center', va='bottom', fontweight='bold', fontsize=font_size)
+    
+    # Add "Concept Activations" header above the heatmap columns at same height
+    if num_concepts > 0:
+        # Get position of first heatmap column
+        first_heatmap_ax = axes[1]
+        last_heatmap_ax = axes[-1]
+        
+        # Calculate center position for the header
+        first_pos = first_heatmap_ax.get_position()
+        last_pos = last_heatmap_ax.get_position()
+        header_x = (first_pos.x0 + last_pos.x1) / 2
+        
+        # Use the same header_y as "Image"
+        fig.text(header_x, header_y, 'Concept Activations', 
+                ha='center', va='bottom', fontweight='bold', fontsize=font_size)
+    
+    # Add colorbar
+    if show_colorbar_ticks:
+        cbar_ax = fig.add_axes([0.93, 0.15, 0.02, 0.65])
+        cb = fig.colorbar(im, cax=cbar_ax)
+        cb.set_label('Activation Strength', fontsize=font_size)
+        cb.ax.tick_params(labelsize=font_size-2)
+    
+    if save_file:
+        plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight')
+        
+        # Save colorbar separately if requested
+        if save_colorbar:
+            # Generate colorbar filename
+            import os
+            base_name, ext = os.path.splitext(save_file)
+            colorbar_file = f"{base_name}_colorbar{ext}"
+            
+            # Create a new figure just for the colorbar
+            fig_cbar = plt.figure(figsize=(1.5, 4))
+            ax_cbar = fig_cbar.add_axes([0.2, 0.1, 0.2, 0.8])
+            
+            # Create a dummy mappable with the same colormap and normalization
+            import matplotlib.cm as cm
+            import matplotlib.colors as mcolors
+            norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+            sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+            sm.set_array([])
+            
+            # Add colorbar
+            cbar = fig_cbar.colorbar(sm, cax=ax_cbar)
+            
+            # Only add ticks and labels if show_colorbar_ticks is True
+            if show_colorbar_ticks:
+                cbar.set_label('Activation Strength', fontsize=font_size)
+                cbar.ax.tick_params(labelsize=font_size-2)
+            else:
+                # Remove ticks and labels for clean colorbar
+                cbar.set_ticks([])
+                cbar.ax.set_yticklabels([])
+            
+            # Save the colorbar figure
+            fig_cbar.savefig(colorbar_file, dpi=500, format='pdf', bbox_inches='tight')
+            plt.close(fig_cbar)
+            print(f"Colorbar saved to: {colorbar_file}")
+    
     plt.show()
 
 
@@ -1949,7 +2430,11 @@ def plot_binarized_patchsims_with_raw_heatmaps(
 #         heatmap_orig = heatmaps[concept_label].detach().cpu().numpy()
 #         heatmap_resized = Image.fromarray(heatmap_orig).resize(resized_image.size, resample=Image.NEAREST)
 #         heatmap_resized = np.array(heatmap_resized)
-#         heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
+#         # Only crop for LLAMA (560x560), not for CLIP (224x224)
+#         if model_input_size == (224, 224):
+#             heatmap_cropped = heatmap_resized
+#         else:
+#             heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
 
 #         axes[row, col].imshow(image_cropped, alpha=1.0)
 #         im = axes[row, col].imshow(heatmap_cropped, cmap='magma', interpolation='nearest', vmin=vmin, vmax=vmax, alpha=0.8)
@@ -1986,10 +2471,13 @@ def plot_binarized_patchsims_with_raw_heatmaps(
 def filter_and_plot_concept_images(
     metadata_path,
     required_concepts,
+    dataset_name='Coco',
     chosen_split='train',
     start_idx=0,
     n_images=10,
-    plot=True
+    plot=True,
+    exclude_concepts=None,
+    show_seg=False
 ):
     """
     Filters metadata for rows with specified binary concepts and plots first n image thumbnails.
@@ -1997,46 +2485,129 @@ def filter_and_plot_concept_images(
     Args:
         metadata_path (str): Path to metadata CSV.
         required_concepts (list): Concept column names required to be 1 (e.g., ['has_color_red']).
+        dataset_name (str): Name of the dataset (e.g., 'Coco', 'Broden-OpenSurfaces', 'Broden-Pascal').
         chosen_split (str): Split to filter on ('train', 'test', etc.).
         n_images (int): Number of matching images to display.
         plot (bool): Whether to plot the images.
-
-    Returns:
-        list: Indices of the filtered rows.
+        exclude_concepts (list): Concept column names required to be 0 (excluded). Default is None.
+        show_seg (bool): Whether to show segmentation overlays with yellow outline (for Broden datasets only).
     """
+    import numpy as np
+    from utils.general_utils import pad_or_resize_img_tensor
+    
     metadata = pd.read_csv(metadata_path)
 
     # Validate concept columns
     for concept in required_concepts:
         if concept not in metadata.columns:
             raise ValueError(f"Missing concept column: {concept}")
+    
+    # Load segmentations if needed
+    all_segs = None
+    if show_seg and 'Broden' in dataset_name:
+        all_segs = torch.load(f'../Data/{dataset_name}/segmentations.pt')
+    
+    if exclude_concepts:
+        for concept in exclude_concepts:
+            if concept not in metadata.columns:
+                raise ValueError(f"Missing concept column: {concept}")
 
     # Apply filtering
     mask = metadata['split'] == chosen_split
     for concept in required_concepts:
         mask &= metadata[concept] == 1
+    
+    # Apply exclusion filtering
+    if exclude_concepts:
+        for concept in exclude_concepts:
+            mask &= metadata[concept] == 0
 
     filtered_df = metadata[mask][start_idx:start_idx+n_images]
 
     if plot:
-        fig, axes = plt.subplots(1, len(filtered_df), figsize=(3 * len(filtered_df), 3))
-        if len(filtered_df) == 1:
-            axes = [axes]  # make iterable
+        n_imgs = len(filtered_df)
+        n_cols = min(n_imgs, 5)  # Max 5 images per row
+        n_rows = (n_imgs + 4) // 5  # Calculate number of rows needed
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows))
+        
+        # Ensure axes is always 2D array for consistent indexing
+        if n_rows == 1 and n_cols == 1:
+            axes = np.array([[axes]])
+        elif n_rows == 1:
+            axes = axes.reshape(1, -1)
+        elif n_cols == 1:
+            axes = axes.reshape(-1, 1)
+        
+        # Flatten axes for easy iteration
+        axes_flat = axes.flatten()
 
-        for ax, (_, row) in zip(axes, filtered_df.iterrows()):
+        for idx, (metadata_idx, row) in enumerate(filtered_df.iterrows()):
+            ax = axes_flat[idx]
             try:
-                img = Image.open(f'../Data/Coco/{row["image_path"]}')
-                ax.imshow(img)
+                img = Image.open(f'../Data/{dataset_name}/{row["image_path"]}')
+                img_array = np.array(img)
+                
+                # Generate title - handle material concepts for Broden-OpenSurfaces
+                title_parts = [f'Index: {metadata_idx}']
+                if dataset_name == 'Broden-OpenSurfaces':
+                    for concept in required_concepts:
+                        if row[concept] == 1 and 'material' in concept:
+                            # Extract part after :: and capitalize
+                            if '::' in concept:
+                                material_name = concept.split('::')[-1].capitalize()
+                                title_parts.append(material_name)
+                            else:
+                                title_parts.append(concept)
+                        elif row[concept] == 1:
+                            title_parts.append(concept)
+                else:
+                    # For other datasets, just add the concept names
+                    for concept in required_concepts:
+                        if row[concept] == 1:
+                            title_parts.append(concept)
+                
+                # Add segmentation overlay if requested
+                if show_seg and 'Broden' in dataset_name and all_segs is not None:
+                    concept_masks = all_segs[metadata_idx]
+                    
+                    # Find the first required concept that exists in the masks
+                    overlay_mask = None
+                    for concept in required_concepts:
+                        if concept in concept_masks:
+                            concept_mask = concept_masks[concept]
+                            # Resize mask to match image size
+                            if isinstance(concept_mask, torch.Tensor):
+                                resized_mask = pad_or_resize_img_tensor(concept_mask, img_array.shape[:2], is_mask=True)
+                                overlay_mask = resized_mask.cpu().numpy()
+                            else:
+                                overlay_mask = concept_mask
+                            break
+                    
+                    # Apply yellow outline if mask exists
+                    if overlay_mask is not None:
+                        from scipy import ndimage
+                        # Find edges of the mask
+                        edges = ndimage.binary_dilation(overlay_mask) & ~overlay_mask
+                        # Apply yellow outline
+                        img_array = img_array.copy()
+                        img_array[edges == 1] = [255, 255, 0]  # Yellow color
+                
+                ax.imshow(img_array)
                 ax.axis('off')
-                ax.set_title(row['image_path'].split('/')[-1])
+                ax.set_title(' | '.join(title_parts))
+                
             except Exception as e:
-                ax.text(0.5, 0.5, "Image load failed", ha='center')
+                ax.text(0.5, 0.5, f"Image load failed: {str(e)}", ha='center')
                 ax.axis('off')
+        
+        # Hide any unused subplots
+        for idx in range(len(filtered_df), len(axes_flat)):
+            axes_flat[idx].axis('off')
 
         plt.tight_layout()
         plt.show()
 
-    return filtered_df.index.tolist()
 
 
 def plot_aligned_images_chunked(concept_key, dataset_name, acts_loader, 
@@ -2317,20 +2888,51 @@ def plot_superpatches_on_heatmaps(
     concept_labels, heatmaps, image_index, images,
     thresholds, metric_type, model_input_size,
     dataset_name, save_file=None,
-    vmin=None, vmax=None):
-
-
+    vmin=None, vmax=None, show_colorbar_ticks=True,
+    separate_cbar=False, heatmap_alpha=0.6, figure_width=None):
+    """
+    Plot superpatches on heatmaps with proper font styling.
+    
+    Args:
+        figure_width: Figure width in inches. Height is calculated automatically based on rows.
+    """
+    # Apply paper plotting style
+    from utils.general_utils import get_paper_plotting_style
+    plt.rcParams.update(get_paper_plotting_style())
+    
+    import matplotlib.colors as colors
+    
     num_concepts = len(concept_labels)
     concepts_per_row = 3
     num_rows = int(np.ceil(num_concepts / concepts_per_row))
 
-    fig, axes = plt.subplots(num_rows, concepts_per_row + 1, figsize=(5.5, 2.9))
-    axes = np.array(axes)
+    # Calculate figure dimensions
+    if figure_width is None:
+        fig_width = 5.5
+    else:
+        fig_width = figure_width
+    
+    # Height scales with number of rows
+    fig_height = 2.2 * num_rows
+    
+    # Create figure without subplots for custom layout
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    
+    # We'll manually create axes as needed
+    axes = np.zeros((num_rows, concepts_per_row + 1), dtype=object)
 
-    image = images[image_index]
+    # Load image internally if not provided
+    if images is None:
+        image = retrieve_image(image_index, dataset_name)
+    else:
+        image = images[image_index]
     resized_image = pad_or_resize_img(image, model_input_size)
     image_np = np.array(resized_image.convert("RGB")) / 255.0
-    image_cropped = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+    # Only crop for LLAMA (560x560), not for CLIP (224x224)
+    if model_input_size == (224, 224):
+        image_cropped = image_np
+    else:
+        image_cropped = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
 
     if vmin is None or vmax is None:
         all_values = np.concatenate([
@@ -2341,30 +2943,81 @@ def plot_superpatches_on_heatmaps(
 
     colorbar_im = None
 
-    # Turn off all axes initially
-    for i in range(num_rows):
-        for j in range(concepts_per_row + 1):
-            axes[i, j].axis('off')
-
-    # Manually position original image between heatmap rows
-    orig_ax = fig.add_axes([0.01, 0.64 - (1 / (num_rows * 2)), 0.25, 0.32])
+    # For the original image - position it at the top
+    # Will update size after calculating ax_width and ax_height
+    orig_ax = fig.add_axes([0.01, 0.5, 0.22, 0.22])  # Temporary position
     orig_ax.imshow(image_cropped)
     orig_ax.axis('off')
-    orig_ax.set_title("Original")
+    orig_ax.set_title("Original", fontsize=plt.rcParams['font.size'], fontweight='bold')
 
+    # Calculate positions for heatmap axes
+    ax_width = 0.22  # Width of each axis
+    # Scale ax_height based on number of rows to fit better
+    ax_height = 0.8 / (num_rows + 0.5)  # Dynamic height based on rows
+    x_spacing = 0.23  # Horizontal spacing
+    x_offset = 0.28  # Start position for heatmaps
+    
+    # Position original image with same size as heatmaps, aligned with first row
+    # Use consistent spacing: x_offset - x_spacing to maintain even column spacing
+    orig_x = x_offset - x_spacing
+    # Calculate y position after we know y_start
+    # Will update position after calculating heatmap positions
+    
+    # Calculate vertical spacing between rows
+    # Position rows to be centered vertically in the figure
+    if num_rows == 1:
+        y_spacing = 0
+        y_start = 0.5 - ax_height/2  # Center single row
+        # Position the original image aligned with the single row
+        orig_ax.set_position([orig_x, y_start, ax_width, ax_height])
+    else:
+        # For multiple rows, make them nearly touching
+        vertical_gap = -0.07  # Moderate overlap to bring rows closer
+        y_spacing = ax_height + vertical_gap
+        
+        # Calculate total height and center vertically
+        total_height = num_rows * ax_height + (num_rows - 1) * vertical_gap
+        y_start = 0.5 + total_height/2 - ax_height
+    
+    # Now position the original image aligned with the first row
+    orig_ax.set_position([orig_x, y_start, ax_width, ax_height])
+    
     for idx, concept_label in enumerate(concept_labels):
         row = idx // concepts_per_row
-        col = (idx % concepts_per_row) + 1
+        col = (idx % concepts_per_row)
+
+        # Create axis at calculated position
+        x_pos = x_offset + col * x_spacing
+        y_pos = y_start - row * y_spacing
+        ax = fig.add_axes([x_pos, y_pos, ax_width, ax_height])
+        axes[row, col + 1] = ax
 
         heatmap_orig = heatmaps[concept_label].detach().cpu().numpy()
+        print("min:", heatmap_orig.min())
+        print("max:", heatmap_orig.max())
         heatmap_resized = Image.fromarray(heatmap_orig).resize(resized_image.size, resample=Image.NEAREST)
         heatmap_resized = np.array(heatmap_resized)
-        heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
+        # Only crop for LLAMA (560x560), not for CLIP (224x224)
+        if model_input_size == (224, 224):
+            heatmap_cropped = heatmap_resized
+        else:
+            heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
 
-        axes[row, col].imshow(image_cropped, alpha=1.0)
-        im = axes[row, col].imshow(heatmap_cropped, cmap='magma', interpolation='nearest', vmin=vmin, vmax=vmax, alpha=0.8)
-        axes[row, col].axis('off')
-        axes[row, col].set_title(concept_label.capitalize(), fontstyle='italic')
+        ax.imshow(image_cropped, alpha=1.0)
+        
+        # Apply mild smoothing to the values only (not the shapes)
+        from scipy.ndimage import gaussian_filter
+        # Use a small sigma to smooth color transitions without blurring patch boundaries
+        heatmap_smoothed = gaussian_filter(heatmap_cropped, sigma=0.6)
+        
+        # Use TwoSlopeNorm to center colormap at 0
+        # Use the provided vmin/vmax or fall back to this heatmap's range
+        heatmap_vmin = vmin if vmin is not None else heatmap_smoothed.min()
+        heatmap_vmax = vmax if vmax is not None else heatmap_smoothed.max()
+        norm = colors.TwoSlopeNorm(vmin=heatmap_vmin, vcenter=0, vmax=heatmap_vmax)
+        im = ax.imshow(heatmap_smoothed, cmap='coolwarm', interpolation='nearest', norm=norm, alpha=heatmap_alpha)
+        ax.axis('off')
+        ax.set_title(concept_label.capitalize(), fontstyle='italic', fontsize=plt.rcParams['font.size'] - 1)
 
         if colorbar_im is None:
             colorbar_im = im
@@ -2372,7 +3025,7 @@ def plot_superpatches_on_heatmaps(
         grid_size = heatmap_orig.shape[0]
         patch_h = resized_image.size[1] / grid_size
         patch_w = resized_image.size[0] / grid_size
-        threshold = thresholds[concept_label][0]
+        threshold = thresholds[concept_label]
 
         for i_patch in range(grid_size):
             for j_patch in range(grid_size):
@@ -2380,19 +3033,270 @@ def plot_superpatches_on_heatmaps(
                     x = j_patch * patch_w
                     y = i_patch * patch_h
                     rect = mpatches.Rectangle((x, y), patch_w, patch_h,
-                                              linewidth=1, edgecolor='deepskyblue', facecolor='none')
-                    axes[row, col].add_patch(rect)
+                                              linewidth=1, edgecolor='#00ff00', facecolor='none')
+                    ax.add_patch(rect)
 
-    # Horizontal colorbar centered under the plots
-    fig.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.2, wspace=0.1, hspace=0.2)
-    cbar_width = 0.6
-    cbar_center = 0.5 - cbar_width / 2
-    cbar_ax = fig.add_axes([cbar_center, 0.16, cbar_width, 0.02])
-    fig.colorbar(colorbar_im, cax=cbar_ax, orientation='horizontal', label='Cosine Similarity to Concept')
+    if separate_cbar:
+        # Save main plot without colorbar
+        if save_file:
+            plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight', facecolor='white')
+        plt.show()
+        
+        # Create separate horizontal colorbar figure (rotated from main plot)
+        cbar_fig, cbar_ax = plt.subplots(figsize=(6, 0.5))
+        cbar_fig.subplots_adjust(left=0.05, right=0.95, top=0.6, bottom=0.3)
+        
+        # Create a mappable object for the colorbar
+        # Use global min/max from all heatmaps for consistent colorbar
+        norm = colors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap='coolwarm')
+        sm.set_array([])
+        
+        # Add horizontal colorbar with same font size
+        cbar = cbar_fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
+        cbar.set_label(metric_type, fontsize=plt.rcParams['font.size'])
+        
+        if not show_colorbar_ticks:
+            cbar_ax.set_xticks([])
+        else:
+            # Keep tick label font size consistent
+            cbar_ax.tick_params(labelsize=plt.rcParams['font.size'] - 2)
+        
+        # Save colorbar separately
+        if save_file:
+            cbar_filename = save_file.rsplit('.', 1)[0] + '_colorbar.' + save_file.rsplit('.', 1)[1]
+            plt.savefig(cbar_filename, dpi=500, format='pdf', bbox_inches='tight')
+        plt.show()
+    else:
+        # Add horizontal colorbar aligned with second row of heatmaps
+        cbar_width = ax_width  # Same width as the image
+        cbar_height = 0.015
+        cbar_x = orig_x  # Same x position as original image
+        # Position colorbar lower, below the center of second row
+        if num_rows > 1:
+            cbar_y = y_start - y_spacing + ax_height/2 - cbar_height/2 - 0.03  # Slightly higher (was -0.04)
+        else:
+            cbar_y = y_start - ax_height - 0.04  # Below single row if only one row (was -0.05)
+        cbar_ax = fig.add_axes([cbar_x, cbar_y, cbar_width, cbar_height])
+        cbar = fig.colorbar(colorbar_im, cax=cbar_ax, orientation='horizontal')
+        # Add newline before 'alignment' if it's in the metric_type
+        label_text = metric_type.replace(' alignment', '\nalignment') if 'alignment' in metric_type else metric_type
+        cbar.set_label(label_text, fontsize=plt.rcParams['font.size'] - 1)  # Same as legend
+        cbar.ax.tick_params(labelsize=plt.rcParams['font.size'] - 2)
+        
+        if not show_colorbar_ticks:
+            # Hide tick labels but keep the label
+            cbar_ax.set_xticks([])
+        
+        # Add legend for superdetector tokens under original image, aligned with second row
+        from matplotlib.patches import Rectangle
+        from matplotlib.lines import Line2D
+        # Create a square marker using Line2D with square marker style
+        legend_elements = [Line2D([0], [0], marker='s', color='w', 
+                                markerfacecolor='none', markeredgecolor='#00ff00',
+                                markeredgewidth=1.5, markersize=8,
+                                label=' SuperActivators')]
+        # Position legend higher, above the center of second row
+        if num_rows > 1:
+            # Position legend significantly above colorbar
+            legend_y = y_start - y_spacing + ax_height/2 + 0.06  # Much higher
+        else:
+            legend_y = y_start - ax_height - 0.02  # Below single row
+        legend_x = orig_x + ax_width/2  # Center under original image
+        legend = fig.legend(handles=legend_elements, loc='center', 
+                          bbox_to_anchor=(legend_x, legend_y + 0.003), frameon=False,
+                          fontsize=plt.rcParams['font.size'] - 1,
+                          handlelength=0.8,  # Slightly increase marker length
+                          handletextpad=0.2,  # Reduced padding between marker and text
+                          alignment='center')  # Center-align multi-line text
 
-    if save_file:
-        plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight')
-    plt.show()
+        if save_file:
+            plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight', facecolor='white')
+        plt.show()
+
+
+def plot_superpatches_on_heatmaps_rotated(
+    concept_labels, heatmaps, image_index, images,
+    thresholds, metric_type, model_input_size,
+    dataset_name, save_file=None,
+    vmin=None, vmax=None, show_colorbar_ticks=True,
+    separate_cbar=False, heatmap_alpha=0.6, figure_width=None):
+    """
+    Rotated version of plot_superpatches_on_heatmaps.
+    Original image at top center, with 2 columns of 3 heatmaps each below.
+    
+    Args:
+        figure_width: Figure width in inches. Height is calculated automatically.
+    """
+    # Apply paper plotting style
+    from utils.general_utils import get_paper_plotting_style
+    plt.rcParams.update(get_paper_plotting_style())
+    
+    import matplotlib.colors as colors
+    
+    num_concepts = len(concept_labels)
+    if num_concepts > 6:
+        raise ValueError("This function supports maximum 6 concepts (2 columns x 3 rows)")
+    
+    # Calculate figure dimensions
+    if figure_width is None:
+        fig_width = 5.5
+    else:
+        fig_width = figure_width
+    
+    # Height includes space for original image at top plus 3 rows of heatmaps
+    fig_height = 6.0  # Adjust as needed
+    
+    # Create figure without subplots for custom layout
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    
+    # Load image internally if not provided
+    if images is None:
+        image = retrieve_image(image_index, dataset_name)
+    else:
+        image = images[image_index]
+    resized_image = pad_or_resize_img(image, model_input_size)
+    image_np = np.array(resized_image.convert("RGB")) / 255.0
+    # Only crop for LLAMA (560x560), not for CLIP (224x224)
+    if model_input_size == (224, 224):
+        image_cropped = image_np
+    else:
+        image_cropped = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+
+    if vmin is None or vmax is None:
+        all_values = np.concatenate([
+            heatmaps[concept].detach().cpu().numpy().flatten()
+            for concept in concept_labels
+        ])
+        vmin, vmax = np.nanmin(all_values), np.nanmax(all_values)
+
+    colorbar_im = None
+
+    # Position original image at top center
+    orig_width = 0.3
+    orig_height = 0.25
+    orig_x = 0.5 - orig_width/2  # Center horizontally
+    orig_y = 0.7  # Position near top
+    orig_ax = fig.add_axes([orig_x, orig_y, orig_width, orig_height])
+    orig_ax.imshow(image_cropped)
+    orig_ax.axis('off')
+    orig_ax.set_title("Original", fontsize=plt.rcParams['font.size'])
+
+    # Calculate positions for heatmap axes in 2 columns x 3 rows
+    ax_width = 0.35  # Width of each axis
+    ax_height = 0.18  # Height of each axis
+    x_spacing = 0.5  # Horizontal spacing between columns
+    y_spacing = 0.22  # Vertical spacing between rows
+    
+    # Starting positions for the two columns
+    left_col_x = 0.1
+    right_col_x = 0.55
+    
+    # Starting y position (below the original image)
+    y_start = 0.45
+    
+    for idx, concept_label in enumerate(concept_labels):
+        # Determine column and row
+        col = idx % 2  # 0 for left, 1 for right
+        row = idx // 2  # 0, 1, or 2
+        
+        # Calculate position
+        x_pos = left_col_x if col == 0 else right_col_x
+        y_pos = y_start - row * y_spacing
+        
+        ax = fig.add_axes([x_pos, y_pos, ax_width, ax_height])
+
+        heatmap_orig = heatmaps[concept_label].detach().cpu().numpy()
+        print("min:", heatmap_orig.min())
+        print("max:", heatmap_orig.max())
+        heatmap_resized = Image.fromarray(heatmap_orig).resize(resized_image.size, resample=Image.NEAREST)
+        heatmap_resized = np.array(heatmap_resized)
+        # Only crop for LLAMA (560x560), not for CLIP (224x224)
+        if model_input_size == (224, 224):
+            heatmap_cropped = heatmap_resized
+        else:
+            heatmap_cropped = top_left_crop_to_original_aspect(heatmap_resized, image.size, resized_image.size)
+
+        ax.imshow(image_cropped, alpha=1.0)
+        
+        # Apply mild smoothing to the values only (not the shapes)
+        from scipy.ndimage import gaussian_filter
+        # Use a small sigma to smooth color transitions without blurring patch boundaries
+        heatmap_smoothed = gaussian_filter(heatmap_cropped, sigma=0.6)
+        
+        # Use TwoSlopeNorm to center colormap at 0
+        # Use the provided vmin/vmax or fall back to this heatmap's range
+        heatmap_vmin = vmin if vmin is not None else heatmap_smoothed.min()
+        heatmap_vmax = vmax if vmax is not None else heatmap_smoothed.max()
+        norm = colors.TwoSlopeNorm(vmin=heatmap_vmin, vcenter=0, vmax=heatmap_vmax)
+        im = ax.imshow(heatmap_smoothed, cmap='coolwarm', interpolation='nearest', norm=norm, alpha=heatmap_alpha)
+        ax.axis('off')
+        ax.set_title(concept_label.capitalize(), fontstyle='italic', fontsize=plt.rcParams['font.size'] - 1)
+
+        if colorbar_im is None:
+            colorbar_im = im
+
+        grid_size = heatmap_orig.shape[0]
+        patch_h = resized_image.size[1] / grid_size
+        patch_w = resized_image.size[0] / grid_size
+        threshold = thresholds[concept_label]
+
+        for i_patch in range(grid_size):
+            for j_patch in range(grid_size):
+                if heatmap_orig[i_patch, j_patch] >= threshold:
+                    x = j_patch * patch_w
+                    y = i_patch * patch_h
+                    rect = mpatches.Rectangle((x, y), patch_w, patch_h,
+                                              linewidth=1, edgecolor='#00ff00', facecolor='none')
+                    ax.add_patch(rect)
+
+    if separate_cbar:
+        # Save main plot without colorbar
+        if save_file:
+            plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight', facecolor='white')
+        plt.show()
+        
+        # Create separate horizontal colorbar figure
+        cbar_fig, cbar_ax = plt.subplots(figsize=(6, 0.5))
+        cbar_fig.subplots_adjust(left=0.05, right=0.95, top=0.6, bottom=0.3)
+        
+        # Create a mappable object for the colorbar
+        # Use global min/max from all heatmaps for consistent colorbar
+        norm = colors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap='coolwarm')
+        sm.set_array([])
+        
+        # Add horizontal colorbar with same font size
+        cbar = cbar_fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
+        cbar.set_label(metric_type, fontsize=plt.rcParams['font.size'])
+        
+        if not show_colorbar_ticks:
+            cbar_ax.set_xticks([])
+        else:
+            # Keep tick label font size consistent
+            cbar_ax.tick_params(labelsize=plt.rcParams['font.size'] - 2)
+        
+        # Save colorbar separately
+        if save_file:
+            cbar_filename = save_file.rsplit('.', 1)[0] + '_colorbar.' + save_file.rsplit('.', 1)[1]
+            plt.savefig(cbar_filename, dpi=500, format='pdf', bbox_inches='tight')
+        plt.show()
+    else:
+        # Original horizontal colorbar centered at bottom
+        cbar_width = 0.6
+        cbar_center = 0.5 - cbar_width / 2
+        cbar_ax = fig.add_axes([cbar_center, 0.02, cbar_width, 0.03])
+        cbar = fig.colorbar(colorbar_im, cax=cbar_ax, orientation='horizontal')
+        cbar.set_label(metric_type, fontsize=plt.rcParams['font.size'])
+        cbar.ax.tick_params(labelsize=plt.rcParams['font.size'] - 2)
+        
+        if not show_colorbar_ticks:
+            # Hide tick labels but keep the label
+            cbar_ax.set_xticks([])
+
+        if save_file:
+            plt.savefig(save_file, dpi=500, format='pdf', bbox_inches='tight', facecolor='white')
+        plt.show()
 
 
 def plot_best_detecting_clusters_calibrated(dataset_name: str,
@@ -2651,6 +3555,228 @@ def compare_calibration_vs_fixed_percentiles(dataset_name: str,
     
     return results_df
 
+
+def plot_patches_by_activation_levels(acts_loader, concept_name, percentiles, 
+                                     dataset_name, model_input_size,
+                                     n_patches=5, patch_size=14, test_only=True,
+                                     save_dir=None, thresholds_dict=None):
+    """
+    Plot patches at different activation levels for a concept:
+    - Top n most activated patches
+    - Bottom n least activated patches  
+    - n patches closest to each percentile threshold
+    
+    Args:
+        acts_loader: ChunkedActivationLoader containing activations
+        concept_name: Name of the concept to visualize
+        percentiles: List of percentiles (e.g., [0.05, 0.5, 0.95])
+        dataset_name: Name of the dataset
+        model_input_size: Model input size tuple
+        n_patches: Number of patches to show for each category
+        patch_size: Size of patches (default 14)
+        test_only: Whether to only use test samples
+        save_dir: Directory to save figures (optional)
+        thresholds_dict: Pre-computed thresholds dict where thresholds_dict[percentile][concept_name] gives threshold
+    """
+    
+    # Load activations for the concept
+    print(f"Loading activations for concept: {concept_name}")
+    
+    # Get concept index
+    if concept_name not in acts_loader.columns:
+        raise ValueError(f"Concept '{concept_name}' not found. Available concepts: {acts_loader.columns[:10]}...")
+    
+    concept_idx = acts_loader.columns.index(concept_name)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Filter for test samples and non-padding patches
+    if test_only:
+        split_df = get_patch_split_df(dataset_name, model_input_size, patch_size)
+        test_indices = split_df[split_df == 'test'].index.tolist()
+        
+        # Filter out padding patches
+        print("Filtering out padding patches...")
+        relevant_indices = filter_patches_by_image_presence(test_indices, dataset_name, model_input_size).tolist()
+        
+        # Load activations in larger chunks for GPU efficiency
+        activations = []
+        patch_indices = []
+        
+        # Larger chunk size for efficiency
+        chunk_size = 100000
+        
+        print(f"Loading {len(relevant_indices)} non-padding test patches in chunks of {chunk_size}...")
+        for i in tqdm(range(0, len(relevant_indices), chunk_size), desc="Loading chunks"):
+            chunk_indices = relevant_indices[i:i+chunk_size]
+            chunk_acts = acts_loader.load_concept_activations_for_indices(
+                concept_name, chunk_indices, device=device
+            )
+            # Keep on GPU for now
+            activations.append(chunk_acts)
+            patch_indices.extend(chunk_indices)
+        
+        # Concatenate on GPU
+        activations_tensor = torch.cat(activations)
+        patch_indices = torch.tensor(patch_indices, device=device)
+    else:
+        # Load all activations for this concept (filtering out padding)
+        print("Loading all activations (this may take a while)...")
+        
+        # Get all indices and filter out padding
+        all_indices = list(range(acts_loader.total_samples))
+        print("Filtering out padding patches from all data...")
+        relevant_indices = filter_patches_by_image_presence(all_indices, dataset_name, model_input_size).tolist()
+        
+        # Load activations in chunks
+        chunk_size = 100000
+        activations = []
+        patch_indices = []
+        
+        print(f"Loading {len(relevant_indices)} non-padding patches in chunks of {chunk_size}...")
+        for i in tqdm(range(0, len(relevant_indices), chunk_size), desc="Loading chunks"):
+            chunk_indices = relevant_indices[i:i+chunk_size]
+            chunk_acts = acts_loader.load_concept_activations_for_indices(
+                concept_name, chunk_indices, device=device
+            )
+            activations.append(chunk_acts)
+            patch_indices.extend(chunk_indices)
+        
+        activations_tensor = torch.cat(activations)
+        patch_indices = torch.tensor(patch_indices, device=device)
+    
+    # Get thresholds - either from provided dict or calculate
+    if thresholds_dict is not None:
+        print("Using provided thresholds...")
+        thresholds_list = []
+        for p in percentiles:
+            if p in thresholds_dict and concept_name in thresholds_dict[p]:
+                threshold_val = thresholds_dict[p][concept_name]
+                # Handle if it's a list/tensor with single value
+                if hasattr(threshold_val, '__len__'):
+                    threshold_val = threshold_val[0]
+                thresholds_list.append(threshold_val)
+            else:
+                raise ValueError(f"Threshold for percentile {p} and concept '{concept_name}' not found in thresholds_dict")
+        thresholds_tensor = torch.tensor(thresholds_list, device=device)
+    else:
+        # Calculate percentile thresholds on GPU
+        print("Calculating percentiles...")
+        thresholds_tensor = torch.quantile(
+            activations_tensor, 
+            torch.tensor([p for p in percentiles], device=device)
+        )
+    
+    # Find patches for each category on GPU
+    print("Finding patches for each category...")
+    patches_to_plot = {}
+    
+    # 1. Top n most activated patches - use torch.topk for efficiency
+    top_values, top_indices = torch.topk(activations_tensor, n_patches)
+    patches_to_plot['Most Activated'] = [
+        (patch_indices[idx].item(), val.item()) 
+        for idx, val in zip(top_indices, top_values)
+    ]
+    
+    # 2. Bottom n least activated patches
+    bottom_values, bottom_indices = torch.topk(activations_tensor, n_patches, largest=False)
+    patches_to_plot['Least Activated'] = [
+        (patch_indices[idx].item(), val.item()) 
+        for idx, val in zip(bottom_indices, bottom_values)
+    ]
+    
+    # 3. Patches closest to each percentile - vectorized computation
+    for i, (percentile, threshold) in enumerate(zip(percentiles, thresholds_tensor)):
+        # Compute distances on GPU
+        distances = torch.abs(activations_tensor - threshold)
+        _, closest_indices = torch.topk(distances, n_patches, largest=False)
+        
+        patches_to_plot[f'Percentile {int(percentile*100)}%'] = [
+            (patch_indices[idx].item(), activations_tensor[idx].item()) 
+            for idx in closest_indices
+        ]
+    
+    # Calculate figure dimensions
+    n_categories = len(patches_to_plot)
+    fig, axes = plt.subplots(n_categories, n_patches, 
+                            figsize=(n_patches * 3, n_categories * 3))
+    
+    if n_categories == 1:
+        axes = axes.reshape(1, -1)
+    if n_patches == 1:
+        axes = axes.reshape(-1, 1)
+    
+    # Plot each category
+    for row_idx, (category_name, patch_list) in enumerate(patches_to_plot.items()):
+        for col_idx, (patch_idx, activation_val) in enumerate(patch_list):
+            ax = axes[row_idx, col_idx]
+            
+            # Get image index and load image
+            image_idx = get_image_idx_from_global_patch_idx(patch_idx, model_input_size, patch_size)
+            image = retrieve_image(image_idx, dataset_name, test_only=False)
+            
+            # Calculate patch location
+            left, top, right, bottom = calculate_patch_location(image, patch_idx, patch_size, model_input_size)
+            
+            # Resize image and create visualization
+            resized_image = pad_or_resize_img(image, model_input_size)
+            
+            # Calculate patches per row/col for title
+            patches_per_row = model_input_size[0] // patch_size
+            patches_per_col = model_input_size[1] // patch_size
+            
+            # Convert to numpy array for display
+            image_np = np.array(resized_image.convert("RGB"))
+            
+            # Only crop for LLAMA (560x560), not for CLIP (224x224)
+            if model_input_size == (224, 224):
+                display_image = image_np
+            else:
+                # Crop to remove padding for LLAMA
+                display_image = top_left_crop_to_original_aspect(image_np, image.size, resized_image.size)
+            
+            # Convert back to PIL for drawing
+            display_image_pil = Image.fromarray(display_image)
+            draw = ImageDraw.Draw(display_image_pil)
+            
+            # Adjust patch coordinates if image was cropped
+            if model_input_size != (224, 224):
+                # For cropped images, we need to ensure the rectangle is within bounds
+                crop_height = display_image.shape[0]
+                if bottom <= crop_height:  # Only draw if patch is within cropped area
+                    draw.rectangle([left, top, right, bottom], outline="red", width=3)
+            else:
+                draw.rectangle([left, top, right, bottom], outline="red", width=3)
+            
+            # Show the image with red rectangle
+            ax.imshow(display_image_pil)
+            ax.set_title(f"Alignment: {activation_val:.3f}", fontsize=10)
+            
+            ax.axis('off')
+            
+            # Add category label on first column
+            if col_idx == 0:
+                ax.text(-0.1, 0.5, category_name, transform=ax.transAxes,
+                       fontsize=12, fontweight='bold', va='center', ha='right',
+                       rotation=90)
+    
+    # Add overall title
+    plt.suptitle(f"Patches for Concept: {concept_name}", fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save if requested
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"{concept_name}_activation_levels.pdf")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved to: {save_path}")
+    
+    plt.show()
+    
+    # Print summary statistics (compute on GPU)
+    print(f"\nSummary for concept '{concept_name}':")
+    print(f"Total patches analyzed: {len(activations_tensor)}")
+    print(f"Activation range: [{activations_tensor.min().item():.3f}, {activations_tensor.max().item():.3f}]")
+    print(f"Percentile thresholds: {dict(zip([f'{int(p*100)}%' for p in percentiles], [t.item() for t in thresholds_tensor]))}")
 
 
 

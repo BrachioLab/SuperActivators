@@ -4,6 +4,7 @@ import pandas as pd
 from tqdm import tqdm
 import sys
 import os
+import argparse
 from collections import defaultdict
 from itertools import product
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -17,18 +18,16 @@ from utils.superdetector_inversion_utils import find_all_superdetector_patches, 
 from utils.quant_concept_evals_utils import detect_then_invert_metrics_over_percentiles, compute_concept_thresholds_over_percentiles
 from utils.gt_concept_segmentation_utils import map_concepts_to_patch_indices, map_concepts_to_image_indices
 from utils.filter_datasets_utils import filter_concept_dict
+from utils.default_percentthrumodels import ALL_PERCENTTHRUMODELS, get_model_default_percentthrumodels
 
 
-MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')), ('Qwen', ('text', 'text3'))]
-MODELS = [('Llama', ('text', 'text'))]  # Focus on Llama text model
+MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')), ('Gemma', ('text', 'text2')), ('Qwen', ('text', 'text3'))]
 
 DATASETS = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Sarcasm', 'iSarcasm', 'GoEmotions']
-DATASETS = ['Sarcasm']  # Focus on Sarcasm dataset
 SAMPLE_TYPES = [('patch', 1000), ('cls', 50)]
-SAMPLE_TYPES = [('patch', 1000)]  # Focus on patch (token) level
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-PERCENT_THRU_MODEL = 100
+PERCENT_THRU_MODEL = 100  # Default value, can be overridden by command line
 SCRATCH_DIR = '/scratch/cgoldberg/'
 PERCENTILES = [0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
 BATCH_SIZE = 300
@@ -116,14 +115,21 @@ def get_files_for_sae(model_name, sample_type, percent_thru_model):
     return con_label, embeddings_file, concepts_file, acts_file
 
 
-def get_all_files(model_name, n_clusters, sample_type, percent_thru_model):
-    all_files = []
-    all_files.append(get_files_for_avg(model_name, n_clusters, sample_type, percent_thru_model))
-    all_files.append(get_files_for_linsep(model_name, n_clusters, sample_type, percent_thru_model))
-    all_files.append(get_files_for_reg_kmeans(model_name, n_clusters, sample_type, percent_thru_model))
-    all_files.append(get_files_for_linsep_kmeans(model_name, n_clusters, sample_type, percent_thru_model))
+def get_all_files(model_name, n_clusters, sample_type, percent_thru_model, concept_types=None):
+    if concept_types is None:
+        concept_types = ['avg', 'linsep', 'kmeans', 'linsepkmeans']
     
-    # Add SAE if applicable (CLIP patch only)
+    all_files = []
+    if 'avg' in concept_types:
+        all_files.append(get_files_for_avg(model_name, n_clusters, sample_type, percent_thru_model))
+    if 'linsep' in concept_types:
+        all_files.append(get_files_for_linsep(model_name, n_clusters, sample_type, percent_thru_model))
+    if 'kmeans' in concept_types:
+        all_files.append(get_files_for_reg_kmeans(model_name, n_clusters, sample_type, percent_thru_model))
+    if 'linsepkmeans' in concept_types:
+        all_files.append(get_files_for_linsep_kmeans(model_name, n_clusters, sample_type, percent_thru_model))
+    
+    # Add SAE if applicable (CLIP patch only) - not controlled by concept_types
     sae_files = get_files_for_sae(model_name, sample_type, percent_thru_model)
     if sae_files is not None:
         all_files.append(sae_files)
@@ -165,65 +171,177 @@ def get_act_metrics(dataset_name, acts_file):
 
 
 if __name__ == "__main__":
-    experiment_configs = product(MODELS, DATASETS, SAMPLE_TYPES)
-    for (model_name, model_input_size), dataset_name, (sample_type, n_clusters) in experiment_configs:
-        # Skip invalid dataset-input size combinations
-        if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
-            continue
-        if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
-            continue
-        
-        
-        print(f"Processing model {model_name} dataset {dataset_name} sample type {sample_type}")
-        #get gt values from calibration dataset
-        if sample_type == 'patch':   
-            gt_samples_per_concept_cal = torch.load(f"GT_Samples/{dataset_name}/gt_patch_per_concept_cal_inputsize_{model_input_size}.pt")   
-        else:
-            gt_samples_per_concept_cal = torch.load(f"GT_Samples/{dataset_name}/gt_samples_per_concept_cal_inputsize_{model_input_size}.pt")
-        
-        # Filter to only relevant concepts for this dataset
-        gt_samples_per_concept_cal = filter_concept_dict(gt_samples_per_concept_cal, dataset_name)
-        print(f"  Filtered to {len(gt_samples_per_concept_cal)} concepts for {dataset_name}")
-  
-        all_files = get_all_files(model_name, n_clusters, sample_type, PERCENT_THRU_MODEL)
-        for con_label, embeddings_file, concepts_file, acts_file in all_files:
-            print(con_label)
-            
-            # Let ChunkedActivationLoader handle finding the file (chunked or not)
-            # It will check for both regular and chunked versions
-            
-            #load concepts
-            if 'sae' in con_label:
-                # For SAE, we don't have a separate concepts file
-                # The concepts are implicitly the SAE units themselves
-                print("   SAE detected - concepts are the SAE units")
-                concepts = None  # Will be handled differently in threshold computation
+    parser = argparse.ArgumentParser(description='Compute validation thresholds for concept detection')
+    parser.add_argument('--dataset', type=str, help='Specific dataset to process')
+    parser.add_argument('--datasets', nargs='+', help='Multiple datasets to process')
+    parser.add_argument('--model', type=str, help='Specific model to use')
+    parser.add_argument('--models', nargs='+', help='Multiple models to use')
+    parser.add_argument('--sample-type', type=str, choices=['patch', 'cls'], help='Sample type to process')
+    parser.add_argument('--concept-types', nargs='+', choices=['avg', 'linsep', 'kmeans', 'linsepkmeans'], 
+                        default=['avg', 'linsep', 'kmeans', 'linsepkmeans'],
+                        help='Concept types to compute thresholds for (default: all)')
+    parser.add_argument('--list-datasets', action='store_true', help='List available datasets and exit')
+    parser.add_argument('--list-models', action='store_true', help='List available models and exit')
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE, help=f'Batch size for processing (default: {BATCH_SIZE})')
+    parser.add_argument('--percentiles', nargs='+', type=float, help='Percentiles to compute thresholds for')
+    parser.add_argument('--percentthrumodels', nargs='+', type=int, default=ALL_PERCENTTHRUMODELS, 
+                        help=f'List of percentages through model layers to use (default: every 2 layers for all models)')
+    
+    args = parser.parse_args()
+    
+    # List available datasets if requested
+    if args.list_datasets:
+        print("Available datasets:")
+        all_datasets = ['CLEVR', 'Coco', 'Broden-Pascal', 'Broden-OpenSurfaces', 'Sarcasm', 'iSarcasm', 'GoEmotions']
+        for dataset in all_datasets:
+            print(f"  - {dataset}")
+        sys.exit(0)
+    
+    # List available models if requested
+    if args.list_models:
+        print("Available models:")
+        all_models = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')), 
+                      ('Gemma', ('text', 'text2')), ('Qwen', ('text', 'text3'))]
+        for model_name, input_size in all_models:
+            print(f"  - {model_name}: {input_size}")
+        sys.exit(0)
+    
+    # Get list of percentthrumodels to process
+    percentthrumodels = args.percentthrumodels
+    
+    # Determine which datasets to process
+    if args.dataset:
+        datasets_to_process = [args.dataset]
+    elif args.datasets:
+        datasets_to_process = args.datasets
+    else:
+        datasets_to_process = DATASETS
+    
+    # Determine which models to process
+    all_available_models = [('CLIP', (224, 224)), ('Llama', (560, 560)), ('Llama', ('text', 'text')), 
+                          ('Gemma', ('text', 'text2')), ('Qwen', ('text', 'text3'))]
+    
+    if args.models:
+        models_to_process = []
+        for model_name in args.models:
+            found = [(m, s) for m, s in all_available_models if m == model_name]
+            if not found:
+                print(f"Error: Model '{model_name}' not found")
+                sys.exit(1)
+            models_to_process.extend(found)
+    elif args.model:
+        models_to_process = [(m, s) for m, s in MODELS if m == args.model]
+        if not models_to_process:
+            # Try to find in all available models
+            models_to_process = [(m, s) for m, s in all_available_models if m == args.model]
+            if not models_to_process:
+                print(f"Error: Model '{args.model}' not found")
+                sys.exit(1)
+    else:
+        models_to_process = MODELS
+    
+    # Determine which sample types to process
+    if args.sample_type:
+        sample_types_to_process = [(s, n) for s, n in SAMPLE_TYPES if s == args.sample_type]
+        if not sample_types_to_process:
+            # Use default cluster sizes
+            if args.sample_type == 'patch':
+                sample_types_to_process = [('patch', 1000)]
             else:
-                concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
-            
-            #compute raw act metrics with cal embeds and concept
-            try:
-                act_loader = get_act_metrics(dataset_name, acts_file)
-                info = act_loader.get_activation_info()
-                # Print concise info without the full concept list
-                print(f"Activation info: {info['total_samples']:,} samples, {info['num_concepts']} concepts, {info['num_chunks']} chunks")
-            except FileNotFoundError as e:
-                print(f"   ⚠️  Activation file not found: {acts_file}, skipping...")
-                print(f"   Error: {e}")
+                sample_types_to_process = [('cls', 50)]
+    else:
+        sample_types_to_process = SAMPLE_TYPES
+    
+    # Update batch size if specified
+    if args.batch_size:
+        BATCH_SIZE = args.batch_size
+    
+    # Update percentiles if specified
+    if args.percentiles:
+        PERCENTILES = args.percentiles
+    
+    # Get list of percentthrumodels to process
+    if args.percentthrumodels != ALL_PERCENTTHRUMODELS:  # User specified custom values
+        percentthrumodels = args.percentthrumodels
+    else:
+        # Compute model-specific defaults based on selected models
+        percentthrumodels = set()
+        for model_name, model_input_size in models_to_process:
+            model_defaults = get_model_default_percentthrumodels(model_name, model_input_size)
+            percentthrumodels.update(model_defaults)
+        percentthrumodels = sorted(list(percentthrumodels))
+    
+    print(f"Using percentthrumodels ({len(percentthrumodels)} values): {percentthrumodels}")
+    
+    # Loop through all percentthrumodels
+    for PERCENT_THRU_MODEL in percentthrumodels:
+        print(f"\n{'='*60}")
+        print(f"Processing with PERCENT_THRU_MODEL = {PERCENT_THRU_MODEL}")
+        print(f"{'='*60}\n")
+        
+        experiment_configs = product(models_to_process, datasets_to_process, sample_types_to_process)
+        for (model_name, model_input_size), dataset_name, (sample_type, n_clusters) in experiment_configs:
+            # Skip this model if the current percentthrumodel is not in its default list
+            model_default_percentiles = get_model_default_percentthrumodels(model_name, model_input_size)
+            if PERCENT_THRU_MODEL not in model_default_percentiles:
                 continue
-      
-            #compute threshold for those concepts
-            if 'kmeans' in con_label or 'sae' in con_label:
-                print("computing thresholds over percentiles (chunked)")
-                # Use chunked version that only loads calibration data
-                compute_concept_thresholds_over_percentiles_all_pairs(act_loader, 
-                                                                      gt_samples_per_concept_cal, 
-                                                                      PERCENTILES, DEVICE,
-                                                                      dataset_name, con_label)  
+            # Skip invalid dataset-input size combinations
+            if model_input_size[0] == 'text' and dataset_name not in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
+                continue
+            if model_input_size[0] != 'text' and dataset_name in ['Stanford-Tree-Bank', 'Sarcasm', 'iSarcasm', 'GoEmotions']:
+                continue
+            
+            
+            print(f"Processing model {model_name} dataset {dataset_name} sample type {sample_type}")
+            #get gt values from calibration dataset
+            if sample_type == 'patch':   
+                gt_samples_per_concept_cal = torch.load(f"GT_Samples/{dataset_name}/gt_patch_per_concept_cal_inputsize_{model_input_size}.pt")   
             else:
-                print("computing thresholds over percentiles")
-                # Use the original function which we'll make compatible with loaders
-                compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, 
-                                                            act_loader, PERCENTILES, DEVICE, 
-                                                            dataset_name, con_label, n_vectors=1,
-                                                            n_concepts_to_print=0)
+                gt_samples_per_concept_cal = torch.load(f"GT_Samples/{dataset_name}/gt_samples_per_concept_cal_inputsize_{model_input_size}.pt")
+            
+            # Filter to only relevant concepts for this dataset
+            gt_samples_per_concept_cal = filter_concept_dict(gt_samples_per_concept_cal, dataset_name)
+            print(f"  Filtered to {len(gt_samples_per_concept_cal)} concepts for {dataset_name}")
+      
+            all_files = get_all_files(model_name, n_clusters, sample_type, PERCENT_THRU_MODEL, args.concept_types)
+            for con_label, embeddings_file, concepts_file, acts_file in all_files:
+                print(con_label)
+                
+                # Let ChunkedActivationLoader handle finding the file (chunked or not)
+                # It will check for both regular and chunked versions
+                
+                #load concepts
+                if 'sae' in con_label:
+                    # For SAE, we don't have a separate concepts file
+                    # The concepts are implicitly the SAE units themselves
+                    print("   SAE detected - concepts are the SAE units")
+                    concepts = None  # Will be handled differently in threshold computation
+                else:
+                    concepts = torch.load(f'Concepts/{dataset_name}/{concepts_file}')
+                
+                #compute raw act metrics with cal embeds and concept
+                try:
+                    act_loader = get_act_metrics(dataset_name, acts_file)
+                    info = act_loader.get_activation_info()
+                    # Print concise info without the full concept list
+                    print(f"Activation info: {info['total_samples']:,} samples, {info['num_concepts']} concepts, {info['num_chunks']} chunks")
+                except FileNotFoundError as e:
+                    print(f"   ⚠️  Activation file not found: {acts_file}, skipping...")
+                    print(f"   Error: {e}")
+                    continue
+          
+                #compute threshold for those concepts
+                if 'kmeans' in con_label or 'sae' in con_label:
+                    print("computing thresholds over percentiles (chunked)")
+                    # Use chunked version that only loads calibration data
+                    compute_concept_thresholds_over_percentiles_all_pairs(act_loader, 
+                                                                          gt_samples_per_concept_cal, 
+                                                                          PERCENTILES, DEVICE,
+                                                                          dataset_name, con_label)  
+                else:
+                    print("computing thresholds over percentiles")
+                    # Use the original function which we'll make compatible with loaders
+                    compute_concept_thresholds_over_percentiles(gt_samples_per_concept_cal, 
+                                                                act_loader, PERCENTILES, DEVICE, 
+                                                                dataset_name, con_label, n_vectors=1,
+                                                                n_concepts_to_print=0)

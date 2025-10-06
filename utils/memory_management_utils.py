@@ -23,6 +23,10 @@ from typing import Dict, List, Tuple, Optional, Union, Iterator, Callable, Any
 from contextlib import contextmanager
 from tqdm import tqdm
 
+import numpy as np
+from utils.convert_to_memmap import convert_embeddings_to_memmap, MemmapEmbeddingLoader
+
+
 class ChunkedEmbeddingLoader:
     """
     Loader for chunked embedding files that provides memory-efficient access.
@@ -31,7 +35,7 @@ class ChunkedEmbeddingLoader:
     Provides iterator interface for processing chunks incrementally.
     """
     
-    def __init__(self, dataset_name: str, embeddings_file: str, scratch_dir: str = '', device: str = 'cpu'):
+    def __init__(self, dataset_name: str, embeddings_file: str, scratch_dir: str = '', device: str = 'cpu', use_memmap: bool = True):
         """
         Initialize the chunked embedding loader.
         
@@ -40,19 +44,22 @@ class ChunkedEmbeddingLoader:
             embeddings_file: Filename of embeddings (e.g., 'Llama_patch_embeddings_percentthrumodel_100.pt')
             scratch_dir: Base scratch directory (e.g., '/scratch/cgoldberg/')
             device: Device to load embeddings on
+            use_memmap: Whether to use memory-mapped files for faster loading
         """
         self.dataset_name = dataset_name
         self.embeddings_file = embeddings_file
         self.scratch_dir = scratch_dir
         self.device = device
+        self.use_memmap = use_memmap
         
         # GPU cache for frequently accessed chunks (3-5x speedup)
         self.gpu_cache = {}
         self.cache_hits = 0
         self.cache_misses = 0
-        self.max_cached_chunks = 8  # Increased cache for better performance (~16GB)
+        self.max_cached_chunks = 4  # Cache 4x9GB chunks on 47GB GPU (~36GB cache, ~11GB free)
         self.embeddings_path = os.path.join(scratch_dir, 'Embeddings', dataset_name, embeddings_file)
         self.is_chunked = False
+        self.memmap_loader = None
         self.chunk_info = None
         self.total_samples = 0
         self.embedding_dim = 0
@@ -72,9 +79,42 @@ class ChunkedEmbeddingLoader:
             'cached_chunks': len(self.gpu_cache),
             'max_chunks': self.max_cached_chunks
         }
+    
+    def clear_cache(self):
+        """Clear the GPU cache to free memory."""
+        self.gpu_cache.clear()
+        gc.collect()
+        if self.device != 'cpu':
+            torch.cuda.empty_cache()
         
     def _detect_chunked_embeddings(self):
-        """Detect if embeddings are split into chunks."""
+        """Detect if embeddings are split into chunks or use memmap."""
+        # First, check if we should use memmap
+        if self.use_memmap and not self.embeddings_path.endswith('_chunked.pt'):
+            base_name = os.path.basename(self.embeddings_path).replace('.pt', '')
+            memmap_info_path = os.path.join(self.chunks_dir, f"{base_name}_memmap_info.pt")
+            memmap_data_path = os.path.join(self.chunks_dir, f"{base_name}_memmap.dat")
+            
+            if os.path.exists(memmap_info_path) and os.path.exists(memmap_data_path):
+                # Load existing memmap
+                print(f"Using existing memory-mapped embeddings")
+                self.memmap_loader = MemmapEmbeddingLoader(memmap_data_path, memmap_info_path)
+                self.total_samples = self.memmap_loader.shape[0]
+                self.embedding_dim = self.memmap_loader.shape[1]
+                return
+            elif os.path.exists(self.embeddings_path):
+                # Create memmap if source exists
+                print(f"Converting to memory-mapped format for faster loading...")
+                try:
+                    memmap_path, info_path = convert_embeddings_to_memmap(self.embeddings_path, self.chunks_dir)
+                    self.memmap_loader = MemmapEmbeddingLoader(memmap_path, info_path)
+                    self.total_samples = self.memmap_loader.shape[0]
+                    self.embedding_dim = self.memmap_loader.shape[1]
+                    return
+                except Exception as e:
+                    print(f"Failed to create memmap: {e}. Falling back to regular loading.")
+                    self.memmap_loader = None
+        
         # Look for chunk info file
         base_name = os.path.splitext(self.embeddings_path)[0]
         chunk_info_file = f"{base_name}_chunks_info.json"
@@ -194,7 +234,7 @@ class ChunkedEmbeddingLoader:
             }
         else:
             # Load info from single file
-            data = torch.load(self.embeddings_path, map_location='cpu', weights_only=True)
+            data = torch.load(self.embeddings_path, map_location=self.device, weights_only=True)
             if 'normalized_embeddings' in data:
                 embeddings = data['normalized_embeddings']
             else:
@@ -216,7 +256,7 @@ class ChunkedEmbeddingLoader:
     def load_specific_embeddings(self, global_indices: List[int]) -> torch.Tensor:
         """
         Load specific embeddings by their global indices.
-        Memory-efficient: only loads the necessary chunks.
+        Memory-efficient: only loads the necessary chunks or uses memmap.
         
         Args:
             global_indices: List of global indices to load
@@ -224,6 +264,11 @@ class ChunkedEmbeddingLoader:
         Returns:
             Tensor containing the requested embeddings in the same order as global_indices
         """
+        # Use memmap loader if available (fastest!)
+        if self.memmap_loader is not None:
+            embeddings = self.memmap_loader.load_specific_embeddings(global_indices)
+            return embeddings.to(self.device)
+        
         if not self.is_chunked:
             # For non-chunked embeddings, load all and index
             data = torch.load(self.embeddings_path, map_location=self.device)
@@ -259,12 +304,18 @@ class ChunkedEmbeddingLoader:
             else:
                 # Cache miss - load from disk
                 chunk_path = os.path.join(self.chunks_dir, self.chunk_info['chunks'][chunk_num]['file'])
-                chunk_data = torch.load(chunk_path, map_location=self.device, weights_only=True)
+                chunk_data = torch.load(chunk_path, map_location=self.device, weights_only=False)
                 
-                if 'normalized_embeddings' in chunk_data:
-                    chunk_embeddings = chunk_data['normalized_embeddings']
+                # Handle both tensor and dict formats
+                if isinstance(chunk_data, torch.Tensor):
+                    chunk_embeddings = chunk_data
+                elif isinstance(chunk_data, dict):
+                    if 'normalized_embeddings' in chunk_data:
+                        chunk_embeddings = chunk_data['normalized_embeddings']
+                    else:
+                        chunk_embeddings = chunk_data['embeddings']
                 else:
-                    chunk_embeddings = chunk_data['embeddings']
+                    raise ValueError(f"Unexpected chunk data type: {type(chunk_data)}")
                 
                 # Add to GPU cache if there's room
                 if len(self.gpu_cache) < self.max_cached_chunks:
@@ -337,28 +388,51 @@ class ChunkedEmbeddingLoader:
         Yields:
             Tuple of (embeddings_chunk, start_idx, end_idx)
         """
+        # Use memmap if available
+        if self.memmap_loader is not None:
+            if chunk_size is None:
+                chunk_size = 50000  # Default chunk size for memmap
+            
+            total_samples = self.memmap_loader.shape[0]
+            for start_idx in range(0, total_samples, chunk_size):
+                end_idx = min(start_idx + chunk_size, total_samples)
+                indices = list(range(start_idx, end_idx))
+                chunk_embeddings = self.memmap_loader.load_specific_embeddings(indices).to(self.device)
+                yield chunk_embeddings, start_idx, end_idx
+                del chunk_embeddings
+                gc.collect()
+            return
+            
         if self.is_chunked:
             # Iterate over existing chunks
             for i, chunk_info in enumerate(self.chunk_info['chunks']):
                 chunk_path = os.path.join(self.chunks_dir, chunk_info['file'])
-                chunk_data = torch.load(chunk_path, map_location=self.device, weights_only=True)
+                # Use mmap_mode=None to prevent memory mapping issues
+                with open(chunk_path, 'rb') as f:
+                    chunk_data = torch.load(f, map_location=self.device, weights_only=True)
                 
-                if 'normalized_embeddings' in chunk_data:
-                    chunk_embeddings = chunk_data['normalized_embeddings']
+                # Handle both dictionary and tensor formats
+                if isinstance(chunk_data, dict):
+                    if 'normalized_embeddings' in chunk_data:
+                        chunk_embeddings = chunk_data['normalized_embeddings'].clone()
+                    else:
+                        chunk_embeddings = chunk_data['embeddings'].clone()
                 else:
-                    chunk_embeddings = chunk_data['embeddings']
+                    # Direct tensor format (e.g., from SAE embeddings)
+                    chunk_embeddings = chunk_data.clone()
                 
                 start_idx = chunk_info['start_idx']
                 end_idx = chunk_info['end_idx']
                 
                 yield chunk_embeddings, start_idx, end_idx
                 
-                # Clean up
-                del chunk_data, chunk_embeddings
+                # Clean up - only delete the original data
+                # The yielded tensor will be cleaned up by the caller
+                del chunk_data
                 gc.collect()
         else:
             # Split single file into chunks on-the-fly
-            data = torch.load(self.embeddings_path, map_location='cpu')
+            data = torch.load(self.embeddings_path, map_location=self.device)
             if 'normalized_embeddings' in data:
                 embeddings = data['normalized_embeddings']
             else:
@@ -814,7 +888,7 @@ class ChunkedActivationLoader:
         self.gpu_cache = {}
         self.cache_hits = 0
         self.cache_misses = 0
-        self.max_cached_chunks = 3  # Cache up to 3 activation chunks on GPU
+        self.max_cached_chunks = 4  # Cache 4x9GB chunks on 47GB GPU (~36GB cache, ~11GB free)
         
         self.is_chunked = False
         self.chunk_files = []
@@ -828,6 +902,8 @@ class ChunkedActivationLoader:
             self.folder = "Superpatches"
         elif 'sae_acts' in acts_file:
             self.folder = "SAE_Acts"
+        elif ('clipscope' in acts_file or 'gemmascope' in acts_file) and 'dense' in acts_file:
+            self.folder = "SAE_Activations_Dense"
         elif 'dists_' in acts_file or 'linsep' in acts_file:
             self.folder = "Distances"
         else:
@@ -874,7 +950,20 @@ class ChunkedActivationLoader:
                 with open(chunk_info_file, 'r') as f:
                     chunk_info = json.load(f)
                 self.total_samples = chunk_info['total_samples']
-                self.columns = chunk_info['concept_names']
+                
+                # Handle different chunk info formats
+                if 'concept_names' in chunk_info:
+                    self.columns = chunk_info['concept_names']
+                elif 'feature_dim' in chunk_info:
+                    # SAE format - generate column names based on feature dimension
+                    num_features = chunk_info['feature_dim']
+                    if 'sae' in self.acts_file or 'dense' in self.acts_file:
+                        self.columns = [str(i) for i in range(num_features)]
+                    else:
+                        self.columns = [f'concept_{i}' for i in range(num_features)]
+                else:
+                    # Fall back to loading first chunk to determine columns
+                    self.columns = None  # Will be set later when loading chunks
                 
                 # Get chunk size from chunk info or actual chunk files
                 if 'chunk_size' in chunk_info:
@@ -890,7 +979,7 @@ class ChunkedActivationLoader:
                 
                 # If chunk_size wasn't in info, determine from first chunk
                 if self.chunk_size is None and self.chunk_files:
-                    first_chunk = torch.load(self.chunk_files[0], map_location='cpu', weights_only=True)
+                    first_chunk = torch.load(self.chunk_files[0], map_location=self.device, weights_only=True)
                     if isinstance(first_chunk, torch.Tensor):
                         self.chunk_size = first_chunk.shape[0]
                     elif isinstance(first_chunk, dict):
@@ -921,7 +1010,7 @@ class ChunkedActivationLoader:
                         if 'sae_acts' in self.acts_file:
                             self.columns = [str(i) for i in range(num_units)]
                         else:
-                            self.columns = [f'concept_{i}' for i in range(num_units)]
+                            self.columns = [str(i) for i in range(num_units)]
                         # Count total samples from all chunks and infer chunk size
                         total_samples = 0
                         self.chunk_size = first_chunk.shape[0]
@@ -945,12 +1034,29 @@ class ChunkedActivationLoader:
             # print(f"   Total samples: {self.total_samples:,}, Concepts: {len(self.columns)}")
             
         elif os.path.exists(self.full_file_path):
-            # Files should always be chunked for memory efficiency
-            raise ValueError(
-                f"Found non-chunked activation file: {self.full_file_path}\n"
-                f"Activation files should be chunked for memory efficiency.\n"
-                f"Please re-generate the activations using the chunked format."
-            )
+            # Non-chunked file exists - support it for small files like SAE dense
+            self.is_chunked = False
+            # Load the file to get metadata
+            data = torch.load(self.full_file_path, map_location=self.device, weights_only=True)
+            
+            if isinstance(data, torch.Tensor):
+                # SAE format - raw tensor
+                self.total_samples = data.shape[0]
+                num_units = data.shape[1]
+                if 'sae_acts' in self.acts_file or 'sae' in self.acts_file:
+                    self.columns = [str(i) for i in range(num_units)]
+                else:
+                    self.columns = [str(i) for i in range(num_units)]
+            elif isinstance(data, dict):
+                # Regular format with metadata
+                self.total_samples = data['activations'].shape[0]
+                self.columns = data['concept_names']
+            else:
+                raise ValueError(f"Unexpected file format in {self.full_file_path}")
+            
+            # For non-chunked files, treat as single chunk
+            self.chunk_files = [self.full_file_path]
+            self.chunk_size = self.total_samples
         else:
             # Check if this is a chunking issue
             chunk_0_file = os.path.join(self.base_path, f"{base_name}_chunk_0.pt")
@@ -974,7 +1080,11 @@ class ChunkedActivationLoader:
         """
         if not self.is_chunked:
             # Load from single file
-            data = torch.load(self.full_file_path, map_location=self.device, weights_only=True)
+            # For SAE activations, need weights_only=False since they're saved as regular tensors
+            try:
+                data = torch.load(self.full_file_path, map_location=self.device, weights_only=True)
+            except:
+                data = torch.load(self.full_file_path, map_location=self.device, weights_only=False)
             
             # Handle different formats
             if isinstance(data, torch.Tensor):
@@ -1059,7 +1169,7 @@ class ChunkedActivationLoader:
         WARNING: This may use a lot of memory for large files.
         """
         if not self.is_chunked:
-            data = torch.load(self.full_file_path, map_location='cpu', weights_only=True)
+            data = torch.load(self.full_file_path, map_location=self.device, weights_only=True)
             
             # Handle different formats
             if isinstance(data, torch.Tensor):
@@ -1340,7 +1450,7 @@ class ChunkedActivationLoader:
             torch.Tensor of shape (num_samples, num_concepts)
         """
         if not self.is_chunked:
-            data = torch.load(self.full_file_path, map_location='cpu', weights_only=True)
+            data = torch.load(self.full_file_path, map_location=self.device, weights_only=True)
             
             # Handle different formats
             if isinstance(data, torch.Tensor):
@@ -1406,7 +1516,7 @@ class ChunkedActivationLoader:
         
         # For non-chunked files, just index directly
         if not self.is_chunked:
-            data = torch.load(self.full_file_path, map_location='cpu', weights_only=True)
+            data = torch.load(self.full_file_path, map_location=self.device, weights_only=True)
             
             # Handle different formats
             if isinstance(data, torch.Tensor):
@@ -1426,7 +1536,7 @@ class ChunkedActivationLoader:
         sorted_indices = torch.sort(split_indices)[0]
         
         # Determine chunk size from first chunk
-        first_chunk_data = torch.load(self.chunk_files[0], map_location='cpu', weights_only=True)
+        first_chunk_data = torch.load(self.chunk_files[0], map_location=self.device, weights_only=True)
         if isinstance(first_chunk_data, torch.Tensor):
             chunk_size = first_chunk_data.shape[0]
         elif isinstance(first_chunk_data, dict):
@@ -1449,7 +1559,7 @@ class ChunkedActivationLoader:
             
             if len(chunk_indices) > 0:
                 # Load this chunk
-                chunk_data = torch.load(chunk_file, map_location='cpu', weights_only=True)
+                chunk_data = torch.load(chunk_file, map_location=self.device, weights_only=True)
                 
                 # Extract activations
                 if isinstance(chunk_data, torch.Tensor):
@@ -1520,7 +1630,14 @@ class ChunkedActivationLoader:
             if chunk_idx >= len(self.chunk_files):
                 break
                 
-            chunk_data = torch.load(self.chunk_files[chunk_idx], map_location='cpu', weights_only=True)
+            try:
+                chunk_data = torch.load(self.chunk_files[chunk_idx], map_location=self.device, weights_only=True)
+            except Exception as e:
+                if "Weights only load failed" in str(e):
+                    # Fall back to weights_only=False if needed
+                    chunk_data = torch.load(self.chunk_files[chunk_idx], map_location=self.device, weights_only=False)
+                else:
+                    raise
             
             # Handle different formats
             if isinstance(chunk_data, torch.Tensor):

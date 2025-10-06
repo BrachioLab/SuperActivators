@@ -4,7 +4,7 @@ import torch
 
 from transformers import CLIPModel, AutoProcessor, MllamaForConditionalGeneration
 
-sys.path.append(os.path.abspath("utils"))
+sys.path.append(os.path.abspath("../utils"))
 from general_utils import load_images
 from compute_concepts_utils import get_clip_cls_embeddings, get_clip_patch_embeddings, compute_batch_embeddings, compute_avg_concept_vectors, compute_cosine_sims, get_llama_patch_embeddings, get_llama_cls_embeddings
 

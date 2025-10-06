@@ -587,5 +587,35 @@ def filter_coco_concepts(original_concepts_list):
     filtered_concepts = [c for c in original_concepts_list if c in high_freq_concepts]
     return filtered_concepts
 
+
+def get_paper_plotting_style():
+    """
+    Returns the default plotting style dictionary for paper-ready figures.
+    Uses serif font and appropriate sizes for publication.
+    
+    Returns:
+        dict: Dictionary of matplotlib rcParams settings
+    """
+    return {
+        "font.family": "DejaVu Serif",
+        "font.size": 10,        # match NeurIPS body text
+        "axes.labelsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 9,    # captions are 9pt
+        "text.color": "black",
+        "axes.labelcolor": "black",
+        "xtick.color": "black",
+        "ytick.color": "black"
+    }
+
+
+def apply_paper_plotting_style():
+    """
+    Applies the default paper plotting style to matplotlib.
+    This modifies the global matplotlib settings.
+    """
+    plt.rcParams.update(get_paper_plotting_style())
+
         
 

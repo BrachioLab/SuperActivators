@@ -1142,29 +1142,12 @@ def compute_concept_thresholds_over_percentiles_all_pairs(loader, gt_samples_per
         max_idx = max(chunk_indices)
         range_size = max_idx - min_idx + 1
         
-        # Handle sparse chunks differently but don't skip them
-        if range_size > len(chunk_indices) * 20:  # More than 20x overhead
-            # For very sparse chunks, load samples individually to avoid huge memory usage
-            chunk_acts_list = []
-            for idx in chunk_indices:
-                try:
-                    # Load just this one sample
-                    single_sample = loader.load_chunk_range(idx, idx + 1).to(device)
-                    chunk_acts_list.append(single_sample)
-                except Exception:
-                    continue
-            
-            if chunk_acts_list:
-                chunk_acts = torch.cat(chunk_acts_list, dim=0)
-                del chunk_acts_list
-            else:
-                continue
-        else:
-            # Load the range for this chunk (efficient case)
-            chunk_range = loader.load_chunk_range(min_idx, max_idx + 1)
-            local_positions = [idx - min_idx for idx in chunk_indices]
-            chunk_acts = chunk_range[local_positions].to(device)
-            del chunk_range
+        # Always load the full range - sparse loading is unnecessarily slow
+        # Load the range for this chunk
+        chunk_range = loader.load_chunk_range(min_idx, max_idx + 1)
+        local_positions = [idx - min_idx for idx in chunk_indices]
+        chunk_acts = chunk_range[local_positions].to(device)
+        del chunk_range
         
         # Create mapping from global index to position in chunk_acts
         chunk_idx_to_pos = {idx: pos for pos, idx in enumerate(chunk_indices)}
@@ -1191,13 +1174,28 @@ def compute_concept_thresholds_over_percentiles_all_pairs(loader, gt_samples_per
                 cluster_sims = concept_chunk_acts[:, cluster_idx]
                 
                 if len(cluster_sims) > 0:
-                    # Compute thresholds for all percentiles at once
-                    percentiles_tensor = torch.tensor([1 - p for p in new_percentiles], device=device)
-                    thresholds = torch.quantile(cluster_sims, percentiles_tensor, interpolation='linear')
+                    # For SAE, only compute percentiles on positive activations
+                    if 'sae' in con_label.lower():
+                        positive_sims = cluster_sims[cluster_sims > 0]
+                        if len(positive_sims) > 0:
+                            percentiles_tensor = torch.tensor([1 - p for p in new_percentiles], device=device)
+                            thresholds = torch.quantile(positive_sims, percentiles_tensor, interpolation='linear')
+                        else:
+                            # No positive activations - use zeros
+                            thresholds = torch.zeros(len(new_percentiles), device=device)
+                    else:
+                        # Regular computation for non-SAE
+                        percentiles_tensor = torch.tensor([1 - p for p in new_percentiles], device=device)
+                        thresholds = torch.quantile(cluster_sims, percentiles_tensor, interpolation='linear')
                     
                     # Accumulate results (we'll combine across chunks later)
                     for p_idx, p in enumerate(new_percentiles):
-                        key = (concept, cluster_label)
+                        # For SAE, remove 'sae_unit_' prefix to match detection metrics expectations
+                        if 'sae_unit_' in cluster_label and cluster_label.startswith('sae_unit_'):
+                            clean_label = cluster_label.replace('sae_unit_', '')
+                        else:
+                            clean_label = cluster_label
+                        key = (concept, clean_label)
                         if key not in all_thresholds.get(p, {}):
                             if p not in all_thresholds:
                                 all_thresholds[p] = {}
@@ -2680,51 +2678,77 @@ def plot_cluster_heatmap_per_concept(concept_to_cluster, metric_name, dataset_na
     
 def filter_and_save_best_clusters(dataset_name, con_label):
     """
-    Filters detection CSVs to only include best cluster per concept and saves as .pt.
+    Filters detection metrics CSVs to only include best cluster per concept.
 
     Args:
-        csv_dir (str): Directory where detection CSVs are stored.
         dataset_name (str): Name of dataset, used to match files.
         con_label (str): Concept group label (used in filenames).
-        best_clusters_by_detect (dict): {concept_name: {'best_cluster': str, ...}}
-        save_dir (str or None): Where to save .pt files. If None, saves to csv_dir.
     """
-    dir = f"Quant_Results/{dataset_name}"
+    metrics_dir = f"Quant_Results/{dataset_name}"
     
-    best_clusters_by_detect = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
+    # Try to load best clusters info
+    try:
+        best_clusters_by_detect = torch.load(f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt', weights_only=False)
+    except FileNotFoundError:
+        print(f"Warning: No best clusters file found for {con_label}, skipping filter_and_save_best_clusters")
+        return
     
-    # Pattern for all matching CSVs
-    pattern = os.path.join(dir, f"detectionmetrics_allpairs_per_*_{con_label}.csv")
+    # Pattern for all matching detection metric CSV files
+    pattern = os.path.join(metrics_dir, f"detectionmetrics_allpairs_per_*_{con_label}.csv")
+    
+    metric_files = glob(pattern)
+    if not metric_files:
+        print(f"Warning: No detection metric files found matching pattern: {pattern}")
+        return
 
-    for csv_file in glob(pattern):
-        df = pd.read_csv(csv_file)
-        df["concept_cluster"] = df["concept"].apply(ast.literal_eval)
-        df["concept_name"] = df["concept_cluster"].apply(lambda x: x[0])
-        df["cluster_id"] = df["concept_cluster"].apply(lambda x: x[1])
-
-        # Filter by best cluster per concept
-        filtered_rows = []
-        for concept, info in best_clusters_by_detect.items():
-            cluster = str(info["best_cluster"])
-            matches = df[(df["concept_name"] == concept) & (df["cluster_id"] == cluster)]
-            if not matches.empty:
-                row = matches.iloc[0].copy()
-                row["concept"] = concept  # overwrite tuple with just concept name
-                row["cluster"] = cluster
-                filtered_rows.append(row)
-
-        if filtered_rows:
-            filtered_df = pd.DataFrame(filtered_rows)
-            filtered_df = filtered_df.drop(columns=["concept_cluster", "concept_name", "cluster_id"])
-
-            # Save as .pt
-            output_filename = os.path.basename(csv_file).replace("_allpairs", "").replace(".csv", ".pt")
-            save_path = os.path.join(dir, output_filename)
-            torch.save(filtered_df, save_path)
-            # print(f"Saved: {save_path}")
-        else:
-            print(f"Warning: No matching rows found in {csv_file}")
+    for metric_file in metric_files:
+        try:
+            # Check if file is empty
+            if os.path.getsize(metric_file) == 0:
+                print(f"Warning: Empty file {metric_file}, skipping")
+                continue
+                
+            # Load the detection metrics CSV
+            df = pd.read_csv(metric_file)
             
+            if df.empty:
+                print(f"Warning: No data in {metric_file}, skipping")
+                continue
+            
+            # Filter to only include best clusters
+            filtered_rows = []
+            
+            for idx, row in df.iterrows():
+                # Parse the concept tuple
+                concept, cluster = ast.literal_eval(row['concept'])
+                
+                # Check if this is the best cluster for this concept
+                if concept in best_clusters_by_detect:
+                    best_info = best_clusters_by_detect[concept]
+                    if str(cluster) == str(best_info['best_cluster']):
+                        # Update the concept column to just be the concept name
+                        row['concept'] = concept
+                        filtered_rows.append(row)
+            
+            # Create filtered dataframe and save
+            if filtered_rows:
+                filtered_df = pd.DataFrame(filtered_rows)
+                # Remove '_allpairs' from filename
+                output_filename = os.path.basename(metric_file).replace("_allpairs", "")
+                save_path = os.path.join(metrics_dir, output_filename)
+                filtered_df.to_csv(save_path, index=False)
+                print(f"   Saved filtered metrics: {output_filename} ({len(filtered_df)} concepts)")
+            else:
+                print(f"Warning: No matching data found in {metric_file}")
+                
+        except pd.errors.EmptyDataError:
+            print(f"Error: Empty CSV file {metric_file} - detection metrics may not have been computed")
+            continue
+        except Exception as e:
+            print(f"Error processing {metric_file}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
 def match_thresholds_across_percentiles(thresholds, dataset_name, con_label):
     alignment_path = f'Unsupervised_Matches/{dataset_name}/bestdetects_{con_label}.pt'
     alignment_results = torch.load(alignment_path, weights_only=False)
@@ -2816,12 +2840,31 @@ def get_matched_concepts_and_data(
                 
                 percent_thru_model = parts[-1]
                 acts_file = f"cosine_similarities_kmeans_{n_clusters}_concepts_{model_name}_{sample_type}_embeddings_percentthrumodel_{percent_thru_model}"
+            elif 'sae' in con_label:
+                # For SAE dense activations
+                parts = base_con_label.split('_')
+                model_name = parts[0]  # CLIP or Gemma
+                sample_type = parts[2]  # patch or cls
+                if model_name == 'CLIP':
+                    acts_file = f"clipscope_{sample_type}_dense"
+                else:  # Gemma
+                    acts_file = f"gemmascope_{sample_type}_dense"
             else:
                 acts_file = f"cosine_similarities_{base_con_label}"
         else:
             # Use the provided acts_file, removing .pt extension if present since ChunkedActivationLoader adds it
             if acts_file.endswith('.pt'):
                 acts_file = acts_file[:-3]
+        
+        # Try to load filtered version first if it's a kmeans method
+        if 'kmeans' in con_label:
+            filtered_acts_file = acts_file.replace('.pt', '_filtered.pt')
+            # Check if filtered version exists
+            import os
+            acts_dir = 'Distances' if 'dists_' in acts_file else 'Cosine_Similarities'
+            filtered_path = os.path.join(scratch_dir, acts_dir, dataset_name, filtered_acts_file + '.pt')
+            if os.path.exists(filtered_path) or os.path.exists(filtered_path.replace('.pt', '_chunks_info.json')):
+                acts_file = filtered_acts_file
         
         activation_loader = ChunkedActivationLoader(dataset_name, acts_file, scratch_dir)
         

@@ -25,8 +25,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # import cupy as cp 
 # from cuml.cluster import KMeans as cuml_kmeans 
-# from fast_pytorch_kmeans import KMeans
-# import faiss
+from fast_pytorch_kmeans import KMeans
+import faiss
 
 
 import matplotlib.pyplot as plt
@@ -1040,69 +1040,32 @@ def preload_train_test_embeddings(embeddings_path: str, train_indices: list, tes
     return train_embeddings, train_labels, test_embeddings, test_labels
 
 
-def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_name, sample_type, model_input_size,
-                                    device='cuda', output_file=None, lr=0.01, epochs=100, batch_size=32, patience=15,
-                                    tolerance=3, weight_decay=1e-4, lr_step_size=10, lr_gamma=0.5, balance_data=True,
-                                    balance_negatives=False):
+def _train_single_concept_parallel(args):
     """
-    Computes linear separators using chunked embeddings loaded on-demand.
+    Helper function for parallel training of a single concept.
+    Must be defined at module level to be picklable.
+    """
+    (concept_name, concept_idx, concept_labels, train_indices, test_indices, 
+     embeddings_path, embeddings_file, dataset_name_from_path, scratch_dir_from_path,
+     embedding_dim, balance_data, batch_size, lr, epochs, weight_decay, 
+     lr_step_size, lr_gamma, patience, tolerance, num_gpus) = args
     
-    Args:
-        embeddings_path: Path to embeddings file (chunked or not)
-        gt_samples_per_concept: Dictionary mapping concept names to lists of positive sample indices
-        Other args same as compute_linear_separators
-        
-    Returns:
-        Dictionary containing learned linear separators and logs
-    """
     from utils.memory_management_utils import ChunkedEmbeddingLoader
     
-    # Parse dataset name and file from path for ChunkedEmbeddingLoader
-    # Expected format: {scratch_dir}Embeddings/{dataset_name}/{embeddings_file}
-    path_parts = embeddings_path.split('/')
-    embeddings_file = path_parts[-1]
-    dataset_name_from_path = path_parts[-2]
-    scratch_dir_from_path = '/'.join(path_parts[:-3]) + '/' if len(path_parts) > 3 else ''
-    
-    # Get embedding info
-    loader = ChunkedEmbeddingLoader(dataset_name_from_path, embeddings_file, scratch_dir_from_path, device='cpu')
-    total_samples = loader.total_samples
-    embedding_dim = loader.embedding_dim
-    
-    if sample_type == 'patch':
-        split_df = get_patch_split_df(dataset_name, model_input_size=model_input_size)
-    elif sample_type == 'cls':
-        split_df = get_split_df(dataset_name)
-    
-    concept_names = gt_samples_per_concept.keys()
-    concept_representations = {}
-    logs = {}
-    
-    # Compute labels
-    print("Computing labels")
-    all_concept_labels = create_binary_labels(total_samples, gt_samples_per_concept)
-    
-    # Get indices for train and test splits
-    if sample_type == 'patch':
-        nonpadding_indices = filter_patches_by_image_presence(split_df.index, dataset_name, model_input_size).tolist()
-        nonpadding_set = set(nonpadding_indices)
-        
-        train_split_indices = split_df[split_df == 'train'].index
-        test_split_indices = split_df[split_df == 'test'].index
-        
-        train_indices = [idx for idx in train_split_indices if idx in nonpadding_set]
-        test_indices = [idx for idx in test_split_indices if idx in nonpadding_set]
+    if num_gpus > 1:
+        # Multiple GPUs: distribute across GPUs
+        device_id = concept_idx % num_gpus
     else:
-        train_indices = list(split_df[split_df == 'train'].index)
-        test_indices = list(split_df[split_df == 'test'].index)
+        # Single GPU or CPU: all use the same device
+        device_id = 0
     
-    # Process each concept
-    for concept_name in tqdm(concept_names):
-        print(f"Training linear classifier for concept {concept_name}")
-        
-        # Get labels for this concept
-        concept_labels = all_concept_labels[concept_name]
-        
+    device_str = f'cuda:{device_id}' if num_gpus > 0 else 'cpu'
+    
+    # Set device for this process
+    if torch.cuda.is_available() and num_gpus > 0:
+        torch.cuda.set_device(device_id)
+    
+    try:
         # Balance dataset if needed
         if balance_data:
             # Convert to tensor for faster indexing
@@ -1136,13 +1099,17 @@ def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_n
                     balanced_test_indices = balanced_test_pos + balanced_test_neg
                     balanced_test_indices_global = [test_indices[i] for i in balanced_test_indices]
                     
+                    # Create new loader for this process
+                    process_loader = ChunkedEmbeddingLoader(dataset_name_from_path, embeddings_file, 
+                                                           scratch_dir_from_path, device='cpu')
+                    
                     # Preload both train and test embeddings together
                     train_embeddings, train_labels_balanced, test_embeddings, test_labels_balanced = preload_train_test_embeddings(
                         embeddings_path,
                         balanced_train_indices,
                         balanced_test_indices_global,
                         concept_labels,
-                        loader
+                        process_loader
                     )
                     
                     from torch.utils.data import TensorDataset
@@ -1152,7 +1119,6 @@ def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_n
                     # No test samples
                     test_dataset = None
                     train_dataset = None
-                    print(f"  Warning: No positive or negative test samples for concept {concept_name}")
             else:
                 # No positive or negative samples
                 train_dataset = None
@@ -1160,42 +1126,34 @@ def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_n
         
         else:
             # Not balancing - preload all train and test indices together
+            process_loader = ChunkedEmbeddingLoader(dataset_name_from_path, embeddings_file, 
+                                                   scratch_dir_from_path, device='cpu')
             train_embeddings, train_labels_all, test_embeddings, test_labels_all = preload_train_test_embeddings(
                 embeddings_path,
                 train_indices,
                 test_indices,
                 concept_labels,
-                loader
+                process_loader
             )
             
             from torch.utils.data import TensorDataset
             train_dataset = TensorDataset(train_embeddings, train_labels_all)
             test_dataset = TensorDataset(test_embeddings, test_labels_all)
         
-        # Create dataloaders
+        # Create dataloaders and train
         if train_dataset is not None and len(train_dataset) > 0 and test_dataset is not None and len(test_dataset) > 0:
             train_dl = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
             test_dl = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
             
             model_weights, concept_logs = train_model(train_dl, test_dl, epochs, lr, weight_decay, 
-                                                    lr_step_size, lr_gamma, patience, tolerance, device)
+                                                    lr_step_size, lr_gamma, patience, tolerance, device_str)
         else:
             # No samples, create random model
-            model = create_linear_model(embedding_dim, device)
+            model = create_linear_model(embedding_dim, device_str)
             model_weights = model.weight.detach().squeeze(0).cpu()
             concept_logs = []
-            if train_dataset is None or len(train_dataset) == 0:
-                print(f"  No train samples for concept {concept_name}, using random model")
-            elif test_dataset is None or len(test_dataset) == 0:
-                print(f"  No test samples for concept {concept_name}, using random model")
-            # Initialize empty tensors for cleanup
-            train_embeddings = torch.tensor([])
-            test_embeddings = torch.tensor([])
         
-        concept_representations[concept_name] = model_weights
-        logs[concept_name] = concept_logs
-        
-        # Memory cleanup
+        # Cleanup
         del train_embeddings, test_embeddings
         if train_dataset:
             del train_dataset
@@ -1203,6 +1161,296 @@ def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_n
             del test_dataset
         torch.cuda.empty_cache()
         gc.collect()
+        
+        return concept_name, model_weights, concept_logs
+        
+    except Exception as e:
+        print(f"Error training concept {concept_name}: {str(e)}")
+        # Return random model on error
+        model = create_linear_model(embedding_dim, 'cpu')
+        model_weights = model.weight.detach().squeeze(0).cpu()
+        return concept_name, model_weights, []
+
+
+def compute_linear_separators(embeddings_path, gt_samples_per_concept, dataset_name, sample_type, model_input_size,
+                                    device='cuda', output_file=None, lr=0.01, epochs=100, batch_size=32, patience=15,
+                                    tolerance=3, weight_decay=1e-4, lr_step_size=10, lr_gamma=0.5, balance_data=True,
+                                    balance_negatives=False, use_parallel=True, num_workers=None, use_batched=False,
+                                    use_onepass=False, onepass_kwargs=None):
+    """
+    Computes linear separators using chunked embeddings loaded on-demand.
+    Automatically uses parallel processing when multiple concepts are available.
+    
+    Args:
+        embeddings_path: Path to embeddings file (chunked or not)
+        gt_samples_per_concept: Dictionary mapping concept names to lists of positive sample indices
+        use_parallel: Whether to use parallel processing (default: True)
+        num_workers: Number of parallel workers (default: number of GPUs)
+        use_batched: Whether to use batched training with single D×K model (default: False)
+        use_onepass: Whether to use one-pass accumulation method (default: False)
+        onepass_kwargs: Additional kwargs for one-pass method (lambda_reg, chunk_size, etc.)
+        Other args same as compute_linear_separators
+        
+    Returns:
+        Dictionary containing learned linear separators and logs
+    """
+    # Use one-pass method if requested
+    if use_onepass:
+        from utils.compute_concepts_utils_onepass import compute_linear_separators_onepass
+        
+        # Set default onepass kwargs if not provided
+        if onepass_kwargs is None:
+            onepass_kwargs = {}
+        
+        # Set defaults for onepass method
+        onepass_defaults = {
+            'lambda_reg': weight_decay if weight_decay > 0 else 1e-3,
+            'chunk_size': 100000,
+            'use_fp16_chunks': True,
+            'normalize_cavs': True,
+            'sign_align': True
+        }
+        
+        # Merge defaults with provided kwargs
+        for key, value in onepass_defaults.items():
+            if key not in onepass_kwargs:
+                onepass_kwargs[key] = value
+        
+        print(f"Using one-pass accumulation method for {len(gt_samples_per_concept)} concepts")
+        return compute_linear_separators_onepass(
+            embeddings_path=embeddings_path,
+            gt_samples_per_concept=gt_samples_per_concept,
+            dataset_name=dataset_name,
+            sample_type=sample_type,
+            model_input_size=model_input_size,
+            device=device,
+            output_file=output_file,
+            **onepass_kwargs
+        )
+    
+    # Use batched training if requested and makes sense (many concepts)
+    if use_batched and len(gt_samples_per_concept) > 100:
+        from utils.compute_concepts_utils_batched_optimized import train_batched_linear_separators_optimized as train_batched_linear_separators
+        print(f"Using batched training for {len(gt_samples_per_concept)} concepts")
+        return train_batched_linear_separators(
+            embeddings_path=embeddings_path,
+            gt_samples_per_concept=gt_samples_per_concept,
+            dataset_name=dataset_name,
+            sample_type=sample_type,
+            model_input_size=model_input_size,
+            device=device,
+            output_file=output_file,
+            lr=lr,
+            epochs=epochs,
+            batch_size=batch_size,
+            patience=patience,
+            tolerance=tolerance,
+            weight_decay=weight_decay,
+            lr_step_size=lr_step_size,
+            lr_gamma=lr_gamma,
+            sample_ratio=1.0,
+            min_samples=10,
+            use_memmap=True,
+            concepts_per_chunk=50
+        )
+    from utils.memory_management_utils import ChunkedEmbeddingLoader
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
+    # Parse dataset name and file from path for ChunkedEmbeddingLoader
+    # Expected format: {scratch_dir}Embeddings/{dataset_name}/{embeddings_file}
+    path_parts = embeddings_path.split('/')
+    embeddings_file = path_parts[-1]
+    dataset_name_from_path = path_parts[-2]
+    scratch_dir_from_path = '/'.join(path_parts[:-3]) + '/' if len(path_parts) > 3 else ''
+    
+    # Get embedding info
+    loader = ChunkedEmbeddingLoader(dataset_name_from_path, embeddings_file, scratch_dir_from_path, device='cpu')
+    total_samples = loader.total_samples
+    embedding_dim = loader.embedding_dim
+    
+    if sample_type == 'patch':
+        split_df = get_patch_split_df(dataset_name, model_input_size=model_input_size)
+    elif sample_type == 'cls':
+        split_df = get_split_df(dataset_name)
+    
+    concept_names = list(gt_samples_per_concept.keys())
+    concept_representations = {}
+    logs = {}
+    
+    # Compute labels
+    print("Computing labels")
+    all_concept_labels = create_binary_labels(total_samples, gt_samples_per_concept)
+    
+    # Get indices for train and test splits
+    if sample_type == 'patch':
+        nonpadding_indices = filter_patches_by_image_presence(split_df.index, dataset_name, model_input_size).tolist()
+        nonpadding_set = set(nonpadding_indices)
+        
+        train_split_indices = split_df[split_df == 'train'].index
+        test_split_indices = split_df[split_df == 'test'].index
+        
+        train_indices = [idx for idx in train_split_indices if idx in nonpadding_set]
+        test_indices = [idx for idx in test_split_indices if idx in nonpadding_set]
+    else:
+        train_indices = list(split_df[split_df == 'train'].index)
+        test_indices = list(split_df[split_df == 'test'].index)
+    
+    # Decide whether to use parallel processing
+    num_concepts = len(concept_names)
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    
+    # Use parallel processing if we have multiple concepts and either multiple GPUs or explicit request
+    # For single GPU, we can still parallelize since linear separators use minimal memory
+    if use_parallel and num_concepts > 1:
+        if num_workers is None:
+            if num_gpus > 1:
+                num_workers = min(num_gpus, num_concepts, 4)  # Multi-GPU: one worker per GPU
+            else:
+                # Single GPU: use multiple workers since each concept uses minimal memory
+                num_workers = min(4, num_concepts)  # Default to 4 workers on single GPU
+        
+        print(f"Using parallel processing with {num_workers} workers for {num_concepts} concepts")
+        
+        # Prepare arguments for parallel processing
+        args_list = []
+        for idx, concept_name in enumerate(concept_names):
+            concept_labels = all_concept_labels[concept_name]
+            args = (
+                concept_name, idx, concept_labels, train_indices, test_indices,
+                embeddings_path, embeddings_file, dataset_name_from_path, scratch_dir_from_path,
+                embedding_dim, balance_data, batch_size, lr, epochs, weight_decay,
+                lr_step_size, lr_gamma, patience, tolerance, num_gpus
+            )
+            args_list.append(args)
+        
+        # Run parallel training
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_concept = {
+                executor.submit(_train_single_concept_parallel, args): args[0]  # args[0] is concept_name
+                for args in args_list
+            }
+            
+            # Process results with progress bar
+            with tqdm(total=len(concept_names), desc="Training concepts (parallel)") as pbar:
+                for future in as_completed(future_to_concept):
+                    concept_name, model_weights, concept_logs = future.result()
+                    concept_representations[concept_name] = model_weights
+                    logs[concept_name] = concept_logs
+                    pbar.update(1)
+    
+    else:
+        # Sequential processing (original code)
+        print(f"Using sequential processing for {num_concepts} concepts")
+        
+        # Process each concept
+        for concept_name in tqdm(concept_names):
+            print(f"Training linear classifier for concept {concept_name}")
+            
+            # Get labels for this concept
+            concept_labels = all_concept_labels[concept_name]
+            
+            # Balance dataset if needed
+            if balance_data:
+                # Convert to tensor for faster indexing
+                train_indices_tensor = torch.tensor(train_indices, dtype=torch.long)
+                train_labels = concept_labels[train_indices_tensor]
+                
+                # Use tensor operations for finding positive/negative indices
+                pos_indices_tensor = torch.where(train_labels == 1)[0]
+                neg_indices_tensor = torch.where(train_labels == 0)[0]
+                pos_indices = pos_indices_tensor.tolist()
+                neg_indices = neg_indices_tensor.tolist()
+                
+                if len(pos_indices) > 0 and len(neg_indices) > 0:
+                    # Balance by undersampling
+                    n_samples = min(len(pos_indices), len(neg_indices))
+                    balanced_pos = random.sample(pos_indices, n_samples)
+                    balanced_neg = random.sample(neg_indices, n_samples)
+                    balanced_indices = balanced_pos + balanced_neg
+                    balanced_train_indices = [train_indices[i] for i in balanced_indices]
+                    
+                    # Now balance test set
+                    test_indices_tensor = torch.tensor(test_indices, dtype=torch.long)
+                    test_labels = concept_labels[test_indices_tensor]
+                    test_pos_indices = torch.where(test_labels == 1)[0].tolist()
+                    test_neg_indices = torch.where(test_labels == 0)[0].tolist()
+                    
+                    if len(test_pos_indices) > 0 and len(test_neg_indices) > 0:
+                        n_test_samples = min(len(test_pos_indices), len(test_neg_indices))
+                        balanced_test_pos = random.sample(test_pos_indices, n_test_samples)
+                        balanced_test_neg = random.sample(test_neg_indices, n_test_samples)
+                        balanced_test_indices = balanced_test_pos + balanced_test_neg
+                        balanced_test_indices_global = [test_indices[i] for i in balanced_test_indices]
+                        
+                        # Preload both train and test embeddings together
+                        train_embeddings, train_labels_balanced, test_embeddings, test_labels_balanced = preload_train_test_embeddings(
+                            embeddings_path,
+                            balanced_train_indices,
+                            balanced_test_indices_global,
+                            concept_labels,
+                            loader
+                        )
+                        
+                        from torch.utils.data import TensorDataset
+                        train_dataset = TensorDataset(train_embeddings, train_labels_balanced)
+                        test_dataset = TensorDataset(test_embeddings, test_labels_balanced)
+                    else:
+                        # No test samples
+                        test_dataset = None
+                        train_dataset = None
+                        print(f"  Warning: No positive or negative test samples for concept {concept_name}")
+                else:
+                    # No positive or negative samples
+                    train_dataset = None
+                    test_dataset = None
+            
+            else:
+                # Not balancing - preload all train and test indices together
+                train_embeddings, train_labels_all, test_embeddings, test_labels_all = preload_train_test_embeddings(
+                    embeddings_path,
+                    train_indices,
+                    test_indices,
+                    concept_labels,
+                    loader
+                )
+                
+                from torch.utils.data import TensorDataset
+                train_dataset = TensorDataset(train_embeddings, train_labels_all)
+                test_dataset = TensorDataset(test_embeddings, test_labels_all)
+            
+            # Create dataloaders
+            if train_dataset is not None and len(train_dataset) > 0 and test_dataset is not None and len(test_dataset) > 0:
+                train_dl = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                test_dl = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+                
+                model_weights, concept_logs = train_model(train_dl, test_dl, epochs, lr, weight_decay, 
+                                                        lr_step_size, lr_gamma, patience, tolerance, device)
+            else:
+                # No samples, create random model
+                model = create_linear_model(embedding_dim, device)
+                model_weights = model.weight.detach().squeeze(0).cpu()
+                concept_logs = []
+                if train_dataset is None or len(train_dataset) == 0:
+                    print(f"  No train samples for concept {concept_name}, using random model")
+                elif test_dataset is None or len(test_dataset) == 0:
+                    print(f"  No test samples for concept {concept_name}, using random model")
+                # Initialize empty tensors for cleanup
+                train_embeddings = torch.tensor([])
+                test_embeddings = torch.tensor([])
+            
+            concept_representations[concept_name] = model_weights
+            logs[concept_name] = concept_logs
+            
+            # Memory cleanup
+            del train_embeddings, test_embeddings
+            if train_dataset:
+                del train_dataset
+            if test_dataset:
+                del test_dataset
+            torch.cuda.empty_cache()
+            gc.collect()
     
     if output_file:
         torch.save(concept_representations, f'Concepts/{dataset_name}/{output_file}')
