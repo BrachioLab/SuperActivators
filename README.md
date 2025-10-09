@@ -65,43 +65,37 @@ export CUDA_VISIBLE_DEVICES=0  # Select GPU
 The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `Experiments` directory:
 
 ### Core Pipeline Steps:
-
 ```bash
 # 1. Extract embeddings
 # For images:
 python scripts/embed_image_datasets.py
-# For text:
-python scripts/embed_text_datasets.py
-
-# 2. Compute ground truth samples (images only)
 python scripts/compute_image_gt_samples.py
 
-# 3. Learn concepts (k-means or linear separators)
+# For text:
+python scripts/embed_text_datasets.py (does gt computation as well)
+
+# 2. Learn concepts
 python scripts/compute_all_concepts.py
 
-# 4. Compute activations (cosine similarities)
+# 3. Compute activations
 python scripts/compute_activations.py
 
-# 5. Find optimal thresholds
+# 4. Find thresholds that contain N% of gt positive calibration samples per-concept
 python scripts/validation_thresholds.py
 
-# 6. Compute detection statistics
+# 5. Compute detection statistics
 python scripts/all_detection_stats.py
 
-# 7. Compute inversion statistics
+# 6. Compute direct alignment inversion statistics
 python scripts/all_inversion_stats.py
 ```
-
-**Key differences between image and text:**
-- Image datasets require step 2 (ground truth samples) for patch-level annotations
-- Both support full pipeline including inversion analysis
 
 ### Extended Analysis (Optional):
 
 After the main pipeline, run these for additional insights:
 
 ```bash
-# Compare with baseline aggregation methods
+# Compare with baseline aggregation methods (max token, mean token, last token, random token)
 python scripts/baseline_detections.py
 
 # Find optimal percentthrumodel for each concept
@@ -190,7 +184,6 @@ Key notebooks:
 - **`Compare-Methods.ipynb`**: Compare detection methods
 - **`Image-Concept-Evals.ipynb`**: Evaluate image concept detection with visualizations
 - **`Text-Concepts.ipynb`**: Text concept analysis and visualization
-
 
 
 ## Directory Structure
