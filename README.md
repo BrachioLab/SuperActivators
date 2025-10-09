@@ -32,12 +32,6 @@ The pipeline supports:
 - Token-level (patches for images, tokens for text) and global-level analysis
 - Comprehensive evaluation across multiple datasets and modalities
 
-## Prerequisites
-
-- Python >= 3.11
-- CUDA-capable GPU (recommended) with at least 40GB VRAM
-- Access to Hugging Face models
-- ~500GB storage for embeddings and intermediate results
 
 ## Installation
 
