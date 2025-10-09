@@ -9,17 +9,28 @@ This repository implements the research on **superdetector tokens** - a novel in
 - [Main Pipeline](#main-pipeline)
 - [Alternative Pipelines](#alternative-pipelines)
 - [Visualization & Analysis](#visualization--analysis)
-- [Pipeline Status Monitoring](#pipeline-status-monitoring)
 - [Directory Structure](#directory-structure)
-- [Troubleshooting](#troubleshooting)
 
 ## Overview
 
-This research addresses the "black box" problem in transformer models by:
-- Discovering **superdetector tokens**: sparse subsets of highly activated tokens that reliably signal concept presence
-- Providing **local, context-aware concept detection** instead of global aggregation
-- Supporting both **supervised** (with ground truth labels) and **unsupervised** (k-means clustering) concept discovery
-- Working across **vision** (CLIP) and **language** (Llama) transformer models
+This repository contains the implementation and analysis pipeline for studying concept detection in transformer models. The codebase focuses on understanding how transformers encode semantic concepts and developing improved methods for detecting and localizing these concepts.
+
+The main contribution is the discovery and analysis of the **Superdetector Mechanism** - a phenomenon where a small subset of highly-activated tokens in the extreme tail of activation distributions can reliably signal concept presence. This approach addresses limitations in standard concept detection methods that suffer from noisy activations and poor localization.
+
+### Supported Datasets & Models
+
+**Datasets:**
+- **Vision**: CLEVR, COCO, Broden-Pascal, Broden-OpenSurfaces
+- **Text**: Sarcasm, Augmented iSarcasm, Augmented GoEmotions
+
+**Models:**
+- **Vision**: CLIP ViT-L/14, Llama-3.2-11B-Vision-Instruct
+- **Text**: Llama-3.2-11B-Vision-Instruct, Gemma-2-9B, Qwen3-Embedding-4B
+
+The pipeline supports:
+- Both supervised and unsupervised concept learning
+- Token-level (patches for images, tokens for text) and global-level analysis
+- Comprehensive evaluation across multiple datasets and modalities
 
 ## Prerequisites
 
@@ -53,11 +64,14 @@ export CUDA_VISIBLE_DEVICES=0  # Select GPU
 
 The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `Experiments` directory:
 
-### For Image Datasets (CLEVR, COCO, Broden):
+### Core Pipeline Steps:
 
 ```bash
 # 1. Extract embeddings
+# For images:
 python scripts/embed_image_datasets.py
+# For text:
+python scripts/embed_text_datasets.py
 
 # 2. Compute ground truth samples (images only)
 python scripts/compute_image_gt_samples.py
@@ -74,23 +88,13 @@ python scripts/validation_thresholds.py
 # 6. Compute detection statistics
 python scripts/all_detection_stats.py
 
-# 7. Compute inversion statistics (images only)
+# 7. Compute inversion statistics
 python scripts/all_inversion_stats.py
 ```
 
-### For Text Datasets (Sarcasm, iSarcasm, GoEmotions):
-
-```bash
-# 1. Extract embeddings
-python scripts/embed_text_datasets.py
-
-# 2-6. Same as steps 3-6 above
-python scripts/compute_all_concepts.py
-python scripts/compute_activations.py
-python scripts/validation_thresholds.py
-python scripts/all_detection_stats.py
-# (No inversion step for text)
-```
+**Key differences between image and text:**
+- Image datasets require step 2 (ground truth samples) for patch-level annotations
+- Both support full pipeline including inversion analysis
 
 ### Extended Analysis (Optional):
 
@@ -102,22 +106,28 @@ python scripts/baseline_detections.py
 
 # Find optimal percentthrumodel for each concept
 python scripts/per_concept_ptm_optimization.py
-
-# Compute bootstrap confidence intervals
-python scripts/detection_errors.py
 ```
 
-### Configuring Pipeline Runs
+### Command Line Arguments
 
-Each script has configuration variables at the top. Modify these before running:
+All pipeline scripts support command line arguments. Examples:
 
-```python
-# Example from scripts/embed_image_datasets.py
-MODELS = ["CLIP-ViT-L-14", "Llama-3.2-11B-Vision-Base"]
-DATASETS = ["CLEVR", "Coco"]
-SAMPLE_TYPES = ["patch", "cls"]
-PERCENTTHRUMODELS = [0, 12, 24, 36, 48, 60, 72, 84, 96]
+```bash
+# Process specific datasets and models
+python scripts/embed_image_datasets.py --models CLIP Llama --datasets CLEVR Coco
+
+# Use specific percentthrumodel values
+python scripts/compute_all_concepts.py --percentthrumodels 0 25 50 75 100
+
+# Process single dataset with specific model
+python scripts/compute_activations.py --model CLIP --dataset CLEVR
 ```
+
+Most scripts support:
+- `--model` or `--models`: Specify which model(s) to use
+- `--dataset` or `--datasets`: Specify which dataset(s) to process
+- `--percentthrumodels`: List of layer percentages to analyze
+- `--sample_type`: Choose between 'patch', 'cls', or 'token' analysis
 
 ## Alternative Pipelines
 
@@ -181,44 +191,7 @@ Key notebooks:
 - **`Image-Concept-Evals.ipynb`**: Evaluate image concept detection with visualizations
 - **`Text-Concepts.ipynb`**: Text concept analysis and visualization
 
-### Quick Visualization of Results
 
-```python
-# Example: Load and visualize detection results
-import torch
-import matplotlib.pyplot as plt
-
-# Load detection stats
-results = torch.load('Quant_Results/CLEVR/detectfirst_CLEVR_supervised_CLIP-ViT-L-14_linsep_patch_embeddings_percentthrumodel_48.pt')
-
-# Plot F1 scores
-plt.figure(figsize=(10, 6))
-plt.plot(results['f1_scores'])
-plt.xlabel('Concept Index')
-plt.ylabel('F1 Score')
-plt.title('Concept Detection Performance')
-plt.show()
-```
-
-## Pipeline Status Monitoring
-
-Check pipeline completion status:
-
-```bash
-# Comprehensive status check (recommended)
-python comprehensive_pipeline_status.py --show-commands
-
-# Check specific datasets
-python comprehensive_pipeline_status.py --datasets CLEVR Coco --show-commands
-
-# Summary only
-python comprehensive_pipeline_status.py --summary-only
-```
-
-This shows:
-- Which pipeline stages are complete/missing
-- Commands to run missing components
-- Overall completion percentage
 
 ## Directory Structure
 
@@ -232,55 +205,18 @@ Experiments/
 ├── notebooks/           # Jupyter notebooks for visualization
 ├── utils/               # Utility functions
 ├── requirements.txt     # Python dependencies
-├── pyproject.toml       # Project configuration
-└── comprehensive_pipeline_status.py  # Pipeline monitoring tool
+└── pyproject.toml       # Project configuration
 ```
 
 Generated directories (created by pipeline):
+- `Embeddings/` - Model embeddings for each dataset
 - `Concepts/` - Learned concepts
+- `Cosine_Similarities/` - Activation measures
+- `Distances/` - Signed distances for linear separators
 - `Thresholds/` - Optimal thresholds  
 - `Quant_Results/` - Detection statistics
-- `Quant_Results_with_CI/` - Results with confidence intervals
 - `Figs/` - Generated figures
 - `prompt_results/` - Prompt concept outputs
 
-External data directories (typically on scratch):
-- `/scratch/cgoldberg/Embeddings/` - Model embeddings
-- `/scratch/cgoldberg/Cosine_Similarities/` - Activation measures
-- `/scratch/cgoldberg/Distances/` - Signed distances
 
-## Troubleshooting
 
-### Common Issues
-
-1. **CUDA Out of Memory**:
-   - Reduce batch size in scripts
-   - Use CPU fallback: `CUDA_VISIBLE_DEVICES="" python script.py`
-
-2. **Missing Files**:
-   - Run `comprehensive_pipeline_status.py` to check what's missing
-   - Ensure previous pipeline steps completed successfully
-
-3. **Index Errors in Token Analysis**:
-   - Check that embeddings match the model's token dimensions
-   - Verify dataset preprocessing completed correctly
-
-4. **Slow Embedding Extraction**:
-   - Normal for large datasets (COCO can take 8+ hours)
-   - Consider running overnight or on multiple GPUs
-
-### Getting Help
-
-- Check existing issues in the repository
-- Look at notebook examples for usage patterns
-- Review script documentation and comments
-
-## Key Research Insights
-
-This pipeline enables discovery of:
-- **Superdetector tokens**: Sparse tokens with high concept activation
-- **Local vs global detection**: Token-level outperforms CLS-level aggregation
-- **Faithful attributions**: More accurate than traditional concept vector methods
-- **Cross-modal applicability**: Works for both vision and language tasks
-
-For detailed methodology and results, see the associated research paper.

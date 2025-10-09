@@ -198,7 +198,9 @@ KMeans-Patch-Concepts-Newest.ipynb
 
 # Files removed from tracking but kept locally
 scripts/baselines.py
+scripts/detection_errors.py
 scripts/compute_patch_cls_activations.py
+comprehensive_pipeline_status.py
 scripts/extract_embedding_stats.py
 scripts/extract_prompt_concepts_fixed.py
 scripts/extract_prompt_concepts_small.py
