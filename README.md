@@ -128,9 +128,9 @@ python scripts/all_detection_stats.py
 # → Evaluates concept detection performance (F1, precision, recall)
 # → Saves to: Quant_Results/{dataset}/
 
-# 6. Compute inversion statistics
+# 6. Compute direct alignment inversion statistics
 python scripts/all_inversion_stats.py
-# → Performs concept localization and attribution analysis
+# → Performs direct alignment inversion for concept localization and attribution
 # → Saves to: Quant_Results/{dataset}/ (inversion metrics)
 ```
 
