@@ -108,7 +108,7 @@ python scripts/compute_all_concepts.py
 # 3. Compute activations
 python scripts/compute_activations.py
 
-# 4. Find thresholds that contain N% of gt positive calibration samples per-concept
+# 4. Find thresholds that contain top N% of gt positive calibration samples per-concept
 python scripts/validation_thresholds.py
 
 # 5. Compute detection statistics
