@@ -118,9 +118,9 @@ python scripts/compute_activations.py
 # → Computes cosine similarities and signed distances for all concepts
 # → Saves to: Cosine_Similarities/{dataset}/ and Distances/{dataset}/
 
-# 4. Find optimal thresholds
+# 4. Find thresholds for different percentiles
 python scripts/validation_thresholds.py
-# → Determines optimal detection thresholds using calibration data
+# → Computes detection thresholds for different N% of positive calibration samples
 # → Saves to: Thresholds/{dataset}/
 
 # 5. Compute detection statistics
