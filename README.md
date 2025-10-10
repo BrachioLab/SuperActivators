@@ -33,7 +33,7 @@ This codebase is designed to work with the following datasets:
 
 ### Vision Datasets
 
-- **CLEVR** - Synthetic scenes with objects of different colors (Blue, Green, Red) and shapes (Cube, Cylinder, Sphere). Generated using the CLEVR generator with single-object scenes.
+- **CLEVR** - Synthetic scenes with objects of different colors (Blue, Green, Red) and shapes (Cube, Cylinder, Sphere). Generated using the [CLEVR generator](https://github.com/facebookresearch/clevr-dataset-gen) with single-object scenes.
 
 - **COCO** - Subset of MS COCO dataset with 80 common object categories. We reference image indices and annotations only; original images must be obtained from the [official COCO dataset](https://cocodataset.org/).
 
