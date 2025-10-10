@@ -48,7 +48,7 @@ This codebase is designed to work with the following datasets:
 
 - **Sarcasm** - Synthetic sarcasm dataset created for this work. Contains paragraph-level and word-level sarcasm annotations. Full dataset available at **[Google Drive link]**.
 
-- **Augmented iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval).
+- **Augmented iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval). The augmentation process is detailed in the paper.
 
 - **Augmented GoEmotions** - Enhanced version of Google's GoEmotions dataset with additional filler text. Based on [GoEmotions](https://github.com/google-research/google-research/tree/master/goemotions) (CC BY 4.0). Augmented version available at **[Google Drive link]**.
 
@@ -90,7 +90,7 @@ export CUDA_VISIBLE_DEVICES=0  # Select GPU
 
 ## Main Pipeline
 
-The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `Experiments` directory:
+The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `scripts` directory:
 
 ### Core Pipeline Steps:
 ```bash
@@ -108,7 +108,7 @@ python scripts/compute_all_concepts.py
 # 3. Compute activations
 python scripts/compute_activations.py
 
-# 4. Find thresholds that contain N% of gt positive calibration samples per-concept
+# 4. Find thresholds that contain top N% of gt positive calibration samples per-concept
 python scripts/validation_thresholds.py
 
 # 5. Compute detection statistics
@@ -149,7 +149,7 @@ Most scripts support:
 - `--model` or `--models`: Specify which model(s) to use
 - `--dataset` or `--datasets`: Specify which dataset(s) to process
 - `--percentthrumodels`: List of layer percentages to analyze
-- `--sample_type`: Choose between 'patch', 'cls', or 'token' analysis
+- `--sample_type`: Choose between 'patch' (same as token in this context) or 'cls' analysis
 
 ## Alternative Pipelines
 
