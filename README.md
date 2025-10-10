@@ -17,15 +17,10 @@ This repository contains the implementation for studying concept detection in tr
 
 The main contribution is the discovery and analysis of the **SuperActivator Mechanism** - a phenomenon where a small subset of highly-activated tokens in the extreme tail of activation distributions can reliably signal concept presence. This approach addresses limitations in standard concept detection methods that suffer from noisy activations and poor localization.
 
-### Supported Datasets & Models
+### Supported Models
 
-**Datasets:**
-- **Vision**: CLEVR, COCO, Broden-Pascal, Broden-OpenSurfaces
-- **Text**: Sarcasm, Augmented iSarcasm, Augmented GoEmotions
-
-**Models:**
-- **Vision**: CLIP ViT-L/14, Llama-3.2-11B-Vision-Instruct
-- **Text**: Llama-3.2-11B-Vision-Instruct, Gemma-2-9B, Qwen3-Embedding-4B
+**Vision**: CLIP ViT-L/14, Llama-3.2-11B-Vision-Instruct  
+**Text**: Llama-3.2-11B-Vision-Instruct, Gemma-2-9B, Qwen3-Embedding-4B
 
 The codebase supports:
 - Both supervised and unsupervised concept learning
@@ -34,15 +29,38 @@ The codebase supports:
 
 ## Datasets
 
-Download the prepared datasets from: https://drive.google.com/drive/folders/1rwrZjWGRF2OpWv6ESMHn87OVl55KsL65?usp=sharing
+This codebase is designed to work with the following datasets:
+
+### Vision Datasets
+
+- **CLEVR** - Synthetic scenes with objects of different colors (Blue, Green, Red) and shapes (Cube, Cylinder, Sphere). Generated using the CLEVR generator with single-object scenes.
+
+- **COCO** - Subset of MS COCO dataset with 80 common object categories. We reference image indices and annotations only; original images must be obtained from the [official COCO dataset](https://cocodataset.org/).
+
+- **Broden-Pascal & Broden-OpenSurfaces** - Concept annotations from the Broden dataset for network dissection. We include metadata referencing concept labels from the original [Broden dataset](http://netdissect.csail.mit.edu/).
+
+### Text Datasets
+
+- **Sarcasm** - Synthetic sarcasm dataset created for this work. Contains paragraph-level and word-level sarcasm annotations.
+
+- **iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval).
+
+- **GoEmotions** - Enhanced version of Google's GoEmotions dataset with additional filler text. Based on [GoEmotions](https://github.com/google-research/google-research/tree/master/goemotions) (CC BY 4.0).
+
+### Download Prepared Datasets
+
+Download all prepared datasets from: https://drive.google.com/drive/folders/1rwrZjWGRF2OpWv6ESMHn87OVl55KsL65?usp=sharing
 
 Each dataset folder in `Data/` contains:
 - `metadata.csv` - Sample identifiers, concept/label information, and file paths
-- Padding masks for vision models (vision datasets only)
+- `patches_w_image_mask_inputsize_(224, 224).pt` - Padding masks for CLIP (vision datasets only)
+- `patches_w_image_mask_inputsize_(560, 560).pt` - Padding masks for Llama Vision (vision datasets only)
+
+The padding masks indicate which patches contain actual image content vs padding, essential for accurate patch-level analysis.
 
 To use these datasets:
 1. Download from the Google Drive link above
-2. Update file paths in `metadata.csv` if needed
+2. Update the `image_path` or `text_path` columns in `metadata.csv` to reflect your local paths
 3. Run the analysis scripts with appropriate dataset arguments
 
 
