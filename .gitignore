@@ -196,6 +196,11 @@ wandb/
 Correlation-Patch-Concepts.ipynb
 KMeans-Patch-Concepts-Newest.ipynb
 
+# Excluded notebooks
+notebooks/Preprocess-Metadata.ipynb
+notebooks/Qual-Over-Layers.ipynb
+notebooks/Visualize-Dataset.ipynb
+
 # Files removed from tracking but kept locally
 scripts/baselines.py
 scripts/detection_errors.py

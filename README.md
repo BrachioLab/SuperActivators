@@ -200,18 +200,19 @@ python embed_text_datasets_sae.py
 
 ### Jupyter Notebooks
 
-Launch Jupyter and explore the notebooks in `notebooks/`:
+The repository includes four analysis notebooks in the `notebooks/` directory:
 
 ```bash
-jupyter lab
+jupyter lab notebooks/
 ```
 
-Key notebooks:
-- **`Visualize-Dataset.ipynb`**: Visualize dataset samples and annotations
-- **`Activation-Distributions.ipynb`**: Analyze activation patterns
-- **`Compare-Methods.ipynb`**: Compare detection methods
-- **`Image-Concept-Evals.ipynb`**: Evaluate image concept detection with visualizations
-- **`Text-Concepts.ipynb`**: Text concept analysis and visualization
+- **`Activation-Distributions.ipynb`** - Visualizes in-concept and out-of-concept activation distributions, demonstrating the separation in the extreme tails that enables the superdetector mechanism
+
+- **`Compare-Methods.ipynb`** - Shows quantitative results comparing concept detection performance and direct alignment inversion accuracy across different methods
+
+- **`Image-Concept-Evals.ipynb`** - Provides qualitative examples of superdetector activations on image datasets, visualizing which patches activate most strongly for different concepts
+
+- **`Text-Concepts.ipynb`** - Shows qualitative examples of superdetector tokens in text datasets, highlighting which words activate most strongly for different concepts
 
 
 ## Directory Structure
