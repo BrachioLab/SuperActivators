@@ -1,21 +1,21 @@
-# Concept Inversion Research - Superdetector Tokens
+# Concept Inversion Research - SuperActivator Tokens
 
-This repository implements the research on **superdetector tokens** - a novel interpretability technique for transformer models that discovers sparse, highly-activated tokens reliably signaling concept presence. This enables state-of-the-art concept detection and more faithful attributions compared to traditional global aggregation methods.
+This repository implements the research on **superactivator tokens** - a novel interpretability technique for transformer models that discovers sparse, highly-activated tokens reliably signaling concept presence. This enables state-of-the-art concept detection and more faithful attributions compared to traditional global aggregation methods.
 
 ## Table of Contents
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [Main Pipeline](#main-pipeline)
-- [Alternative Pipelines](#alternative-pipelines)
+- [Main Concept Detection Analysis](#main-concept-detection-analysis)
+- [Alternative Analysis Methods](#alternative-analysis-methods)
 - [Visualization & Analysis](#visualization--analysis)
 - [Directory Structure](#directory-structure)
 
 ## Overview
 
-This repository contains the implementation and analysis pipeline for studying concept detection in transformer models. The codebase focuses on understanding how transformers encode semantic concepts and developing improved methods for detecting and localizing these concepts.
+This repository contains the implementation for studying concept detection in transformer models. The codebase focuses on understanding how transformers encode semantic concepts and developing improved methods for detecting and localizing these concepts.
 
-The main contribution is the discovery and analysis of the **Superdetector Mechanism** - a phenomenon where a small subset of highly-activated tokens in the extreme tail of activation distributions can reliably signal concept presence. This approach addresses limitations in standard concept detection methods that suffer from noisy activations and poor localization.
+The main contribution is the discovery and analysis of the **SuperActivator Mechanism** - a phenomenon where a small subset of highly-activated tokens in the extreme tail of activation distributions can reliably signal concept presence. This approach addresses limitations in standard concept detection methods that suffer from noisy activations and poor localization.
 
 ### Supported Datasets & Models
 
@@ -27,44 +27,23 @@ The main contribution is the discovery and analysis of the **Superdetector Mecha
 - **Vision**: CLIP ViT-L/14, Llama-3.2-11B-Vision-Instruct
 - **Text**: Llama-3.2-11B-Vision-Instruct, Gemma-2-9B, Qwen3-Embedding-4B
 
-The pipeline supports:
+The codebase supports:
 - Both supervised and unsupervised concept learning
 - Token-level (patches for images, tokens for text) and global-level analysis
 - Comprehensive evaluation across multiple datasets and modalities
 
 ## Datasets
 
-This codebase is designed to work with the following datasets:
-
-### Vision Datasets
-
-- **CLEVR** - Synthetic scenes with objects of different colors (Blue, Green, Red) and shapes (Cube, Cylinder, Sphere). Generated using the CLEVR generator with single-object scenes. Full dataset with images and segmentation masks available at **[Google Drive link]**.
-
-- **COCO** - Subset of MS COCO dataset with 80 common object categories. We reference image indices and annotations only; original images must be obtained from the [official COCO dataset](https://cocodataset.org/).
-
-- **Broden-Pascal & Broden-OpenSurfaces** - Concept annotations from the Broden dataset for network dissection. We include metadata referencing concept labels from the original [Broden dataset](http://netdissect.csail.mit.edu/).
-
-### Text Datasets
-
-- **Sarcasm** - Synthetic sarcasm dataset created for this work. Contains paragraph-level and word-level sarcasm annotations. Full dataset available at **[Google Drive link]**.
-
-- **Augmented iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval). The augmentation process is detailed in the paper.
-
-- **Augmented GoEmotions** - Enhanced version of Google's GoEmotions dataset with additional filler text. Based on [GoEmotions](https://github.com/google-research/google-research/tree/master/goemotions) (CC BY 4.0). Augmented version available at **[Google Drive link]**.
-
-### Using the Datasets
+Download the prepared datasets from: https://drive.google.com/drive/folders/1rwrZjWGRF2OpWv6ESMHn87OVl55KsL65?usp=sharing
 
 Each dataset folder in `Data/` contains:
 - `metadata.csv` - Sample identifiers, concept/label information, and file paths
-- `patches_w_image_mask_inputsize_(224, 224).pt` - Padding masks for CLIP (vision datasets only)
-- `patches_w_image_mask_inputsize_(560, 560).pt` - Padding masks for Llama Vision (vision datasets only)
-
-The padding masks indicate which patches contain actual image content vs padding, essential for accurate patch-level analysis.
+- Padding masks for vision models (vision datasets only)
 
 To use these datasets:
-1. Obtain datasets from their official sources or provided Drive links
-2. Update the `image_path` or `text_path` columns in `metadata.csv` to reflect your local paths
-3. Run the pipeline scripts with appropriate dataset arguments
+1. Download from the Google Drive link above
+2. Update file paths in `metadata.csv` if needed
+3. Run the analysis scripts with appropriate dataset arguments
 
 
 ## Installation
@@ -88,11 +67,11 @@ export HF_HOME=/path/to/huggingface/cache
 export CUDA_VISIBLE_DEVICES=0  # Select GPU
 ```
 
-## Main Pipeline
+## Main Concept Detection Analysis
 
-The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `scripts` directory:
+The concept detection analysis extracts embeddings from transformer models and evaluates concept detection performance. Run these scripts sequentially from the `scripts` directory:
 
-### Core Pipeline Steps:
+### Core Analysis Steps:
 ```bash
 # 1. Extract embeddings
 # For images:
@@ -118,9 +97,11 @@ python scripts/all_detection_stats.py
 python scripts/all_inversion_stats.py
 ```
 
+After completing the analysis, all quantitative results (detection metrics, F1 scores, precision/recall curves, etc.) will be saved in the `Quant_Results/` folder.
+
 ### Extended Analysis (Optional):
 
-After the main pipeline, run these for additional insights:
+After the main analysis, run these for additional insights:
 
 ```bash
 # Compare with baseline aggregation methods (max token, mean token, last token, random token)
@@ -132,7 +113,7 @@ python scripts/per_concept_ptm_optimization.py
 
 ### Command Line Arguments
 
-All pipeline scripts support command line arguments. Examples:
+All analysis scripts support command line arguments. Examples:
 
 ```bash
 # Process specific datasets and models
@@ -151,7 +132,7 @@ Most scripts support:
 - `--percentthrumodels`: List of layer percentages to analyze
 - `--sample_type`: Choose between 'patch' (same as token in this context) or 'cls' analysis
 
-## Alternative Pipelines
+## Alternative Analysis Methods
 
 ### 1. Prompt Concepts Pipeline
 
@@ -164,8 +145,6 @@ python scripts/extract_prompt_concepts.py --dataset CLEVR --model llama3.2-11
 # Evaluate performance
 python scripts/extract_prompt_concepts.py --dataset CLEVR --model llama3.2-11 --eval
 
-# Run inversion for localization (optional)
-python scripts/extract_prompt_concepts.py --dataset CLEVR --model llama3.2-11 --inversion
 ```
 
 Supported models:
@@ -206,24 +185,24 @@ The repository includes four analysis notebooks in the `notebooks/` directory:
 jupyter lab notebooks/
 ```
 
-- **`Activation-Distributions.ipynb`** - Visualizes in-concept and out-of-concept activation distributions, demonstrating the separation in the extreme tails that enables the superdetector mechanism
+- **`Activation-Distributions.ipynb`** - Visualizes in-concept and out-of-concept activation distributions, demonstrating the separation in the extreme tails that enables the superactivator mechanism
 
 - **`Compare-Methods.ipynb`** - Shows quantitative results comparing concept detection performance and direct alignment inversion accuracy across different methods
 
-- **`Image-Concept-Evals.ipynb`** - Provides qualitative examples of superdetector activations on image datasets, visualizing which patches activate most strongly for different concepts
+- **`Image-Concept-Evals.ipynb`** - Provides qualitative examples of superactivator tokens on image datasets, visualizing which patches activate most strongly for different concepts
 
-- **`Text-Concepts.ipynb`** - Shows qualitative examples of superdetector tokens in text datasets, highlighting which words activate most strongly for different concepts
+- **`Text-Concepts.ipynb`** - Shows qualitative examples of superactivator tokens in text datasets, highlighting which words activate most strongly for different concepts
 
 
 ## Directory Structure
 
 ```
 Experiments/
-├── scripts/              # Main pipeline scripts
+├── scripts/              # Main analysis scripts
 │   ├── embed_*.py       # Embedding extraction
 │   ├── compute_*.py     # Concept learning & activation
 │   ├── validation_*.py  # Threshold optimization
-│   └── pretrained_saes/ # SAE pipeline scripts
+│   └── pretrained_saes/ # SAE analysis scripts
 ├── notebooks/           # Jupyter notebooks for visualization
 ├── utils/               # Utility functions
 ├── Data/                # Dataset metadata and padding masks
@@ -231,21 +210,44 @@ Experiments/
 └── pyproject.toml       # Project configuration
 ```
 
-Pipeline Output Directories:
-- `Embeddings/` - Model embeddings for each dataset
-- `Concepts/` - Learned concepts (avg, linsep, kmeans)
-- `Cosine_Similarities/` - Cosine similarity activations
-- `Distances/` - Signed distances for linear separators
-- `GT_Samples/` - Ground truth sample indices
-- `Thresholds/` - Optimal thresholds per concept
-- `Quant_Results/` - Detection and inversion statistics
-- `activation_distributions/` - Activation distribution analysis for visualization
-- `prompt_results/` - Prompt concept extraction outputs
-- `Best_Inversion_Percentiles_Cal/` - Optimal percentiles for inversion
-- `Best_Detection_Percentiles_Cal/` - Optimal percentiles for detection
+Pipeline Output Directories (created during analysis):
+```
+Embeddings/
+├── {dataset}/                    # Model embeddings
+│   └── *.pt                     # Chunked embedding files
+Concepts/
+├── {dataset}/
+│   └── *.pt                     # Learned concept vectors (avg, linsep, kmeans)
+Cosine_Similarities/
+├── {dataset}/
+│   └── *.pt                     # Cosine similarity activations
+Distances/
+├── {dataset}/
+│   └── *.pt                     # Signed distances for linear separators
+GT_Samples/
+├── {dataset}/
+│   └── *.pt                     # Ground truth sample indices
+Thresholds/
+├── {dataset}/
+│   └── *.pt                     # Optimal thresholds per concept
+Quant_Results/
+├── {dataset}/
+│   └── *.pt                     # **Final detection metrics, F1 scores, precision/recall**
+activation_distributions/
+├── {dataset}/
+│   └── *.pt                     # Activation distributions for visualization
+prompt_results/
+├── {dataset}/
+│   └── *.txt, *.csv             # Prompt-based concept extraction results
+Best_Inversion_Percentiles_Cal/
+├── {dataset}/
+│   └── *.pt                     # Optimal percentiles for inversion
+Best_Detection_Percentiles_Cal/
+├── {dataset}/
+│   └── *.pt                     # Optimal percentiles for detection
+```
 
-Each output directory contains subdirectories for the 7 supported datasets:
-CLEVR, Coco, Broden-Pascal, Broden-OpenSurfaces, Sarcasm, iSarcasm, GoEmotions
+Where `{dataset}` is one of: CLEVR, Coco, Broden-Pascal, Broden-OpenSurfaces, Sarcasm, iSarcasm, GoEmotions
 
 
 
