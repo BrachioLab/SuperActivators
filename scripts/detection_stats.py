@@ -10,7 +10,7 @@ from quant_concept_evals_utils import compute_detection_metrics_over_percentiles
 from compute_concepts_utils import apply_zscore_normalization
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-SCRATCH_DIR = '/scratch/'
+SCRATCH_DIR = ''
 MODELS = [('CLIP', (224, 224)), ('Llama', (560, 560))]  
 DATASETS = ['CLEVR', 'Coco']
 SAMPLE_TYPES = ['patch', 'cls']
