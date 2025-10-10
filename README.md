@@ -149,7 +149,7 @@ Most scripts support:
 - `--model` or `--models`: Specify which model(s) to use
 - `--dataset` or `--datasets`: Specify which dataset(s) to process
 - `--percentthrumodels`: List of layer percentages to analyze
-- `--sample_type`: Choose between 'patch', 'cls', or 'token' analysis
+- `--sample_type`: Choose between 'patch' (same as token in this context) or 'cls' analysis
 
 ## Alternative Pipelines
 
