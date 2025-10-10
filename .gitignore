@@ -313,11 +313,6 @@ Best_Detection_Percentiles_Cal/**
 !Best_Detection_Percentiles_Cal/**/
 !Best_Detection_Percentiles_Cal/**/.gitkeep
 
-Hist_Stats/**
-!Hist_Stats/
-!Hist_Stats/**/
-!Hist_Stats/**/.gitkeep
-
 activation_distributions/**
 !activation_distributions/
 !activation_distributions/**/
@@ -327,3 +322,4 @@ activation_distributions/**
 Hybrid_Results/
 Figs/
 Quant_Results_with_CI/
+Hist_Stats/
