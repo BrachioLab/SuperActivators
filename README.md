@@ -96,25 +96,42 @@ The concept detection analysis extracts embeddings from transformer models and e
 # 1. Extract embeddings
 # For images:
 python scripts/embed_image_datasets.py
+# → Computes CLIP/Llama embeddings for image patches and CLS tokens
+# → Saves to: Embeddings/{dataset}/
+
 python scripts/compute_image_gt_samples.py
+# → Identifies ground truth sample indices for concept evaluation
+# → Saves to: GT_Samples/{dataset}/
 
 # For text:
-python scripts/embed_text_datasets.py (does gt computation as well)
+python scripts/embed_text_datasets.py
+# → Computes text embeddings and GT samples in one step
+# → Saves to: Embeddings/{dataset}/ and GT_Samples/{dataset}/
 
 # 2. Learn concepts
 python scripts/compute_all_concepts.py
+# → Learns concept vectors using avg, linear separators, and k-means
+# → Saves to: Concepts/{dataset}/
 
 # 3. Compute activations
 python scripts/compute_activations.py
+# → Computes cosine similarities and signed distances for all concepts
+# → Saves to: Cosine_Similarities/{dataset}/ and Distances/{dataset}/
 
-# 4. Find thresholds that contain top N% of gt positive calibration samples per-concept
+# 4. Find optimal thresholds
 python scripts/validation_thresholds.py
+# → Determines optimal detection thresholds using calibration data
+# → Saves to: Thresholds/{dataset}/
 
 # 5. Compute detection statistics
 python scripts/all_detection_stats.py
+# → Evaluates concept detection performance (F1, precision, recall)
+# → Saves to: Quant_Results/{dataset}/
 
-# 6. Compute direct alignment inversion statistics
+# 6. Compute inversion statistics
 python scripts/all_inversion_stats.py
+# → Performs concept localization and attribution analysis
+# → Saves to: Quant_Results/{dataset}/ (inversion metrics)
 ```
 
 After completing the analysis, all quantitative results (detection metrics, F1 scores, precision/recall curves, etc.) will be saved in the `Quant_Results/` folder.
