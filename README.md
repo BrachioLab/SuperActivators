@@ -61,7 +61,7 @@ Each dataset folder in `Data/` contains:
 The padding masks indicate which patches contain actual image content vs padding, essential for accurate patch-level analysis.
 
 To use these datasets:
-1. Download from the Google Drive link above
+1. Download from the Google Drive link above or the original sources
 2. Update the `image_path` or `text_path` columns in `metadata.csv` to reflect your local paths
 3. Run the analysis scripts with appropriate dataset arguments
 
