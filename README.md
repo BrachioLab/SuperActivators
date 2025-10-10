@@ -226,19 +226,26 @@ Experiments/
 │   └── pretrained_saes/ # SAE pipeline scripts
 ├── notebooks/           # Jupyter notebooks for visualization
 ├── utils/               # Utility functions
+├── Data/                # Dataset metadata and padding masks
 ├── requirements.txt     # Python dependencies
 └── pyproject.toml       # Project configuration
 ```
 
 Pipeline Output Directories:
 - `Embeddings/` - Model embeddings for each dataset
-- `Concepts/` - Learned concepts
-- `Cosine_Similarities/` - Activation measures
+- `Concepts/` - Learned concepts (avg, linsep, kmeans)
+- `Cosine_Similarities/` - Cosine similarity activations
 - `Distances/` - Signed distances for linear separators
-- `Thresholds/` - Optimal thresholds  
-- `Quant_Results/` - Detection statistics
-- `Figs/` - Generated figures
-- `prompt_results/` - Prompt concept outputs
+- `GT_Samples/` - Ground truth sample indices
+- `Thresholds/` - Optimal thresholds per concept
+- `Quant_Results/` - Detection and inversion statistics
+- `activation_distributions/` - Activation distribution analysis for visualization
+- `prompt_results/` - Prompt concept extraction outputs
+- `Best_Inversion_Percentiles_Cal/` - Optimal percentiles for inversion
+- `Best_Detection_Percentiles_Cal/` - Optimal percentiles for detection
+
+Each output directory contains subdirectories for the 7 supported datasets:
+CLEVR, Coco, Broden-Pascal, Broden-OpenSurfaces, Sarcasm, iSarcasm, GoEmotions
 
 
 
