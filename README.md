@@ -32,6 +32,40 @@ The pipeline supports:
 - Token-level (patches for images, tokens for text) and global-level analysis
 - Comprehensive evaluation across multiple datasets and modalities
 
+## Datasets
+
+This codebase is designed to work with the following datasets:
+
+### Vision Datasets
+
+- **CLEVR** - Synthetic scenes with objects of different colors (Blue, Green, Red) and shapes (Cube, Cylinder, Sphere). Generated using the CLEVR generator with single-object scenes. Full dataset with images and segmentation masks available at **[Google Drive link]**.
+
+- **COCO** - Subset of MS COCO dataset with 80 common object categories. We reference image indices and annotations only; original images must be obtained from the [official COCO dataset](https://cocodataset.org/).
+
+- **Broden-Pascal & Broden-OpenSurfaces** - Concept annotations from the Broden dataset for network dissection. We include metadata referencing concept labels from the original [Broden dataset](http://netdissect.csail.mit.edu/).
+
+### Text Datasets
+
+- **Sarcasm** - Synthetic sarcasm dataset created for this work. Contains paragraph-level and word-level sarcasm annotations. Full dataset available at **[Google Drive link]**.
+
+- **Augmented iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval).
+
+- **Augmented GoEmotions** - Enhanced version of Google's GoEmotions dataset with additional filler text. Based on [GoEmotions](https://github.com/google-research/google-research/tree/master/goemotions) (CC BY 4.0). Augmented version available at **[Google Drive link]**.
+
+### Using the Datasets
+
+Each dataset folder in `Data/` contains:
+- `metadata.csv` - Sample identifiers, concept/label information, and file paths
+- `patches_w_image_mask_inputsize_(224, 224).pt` - Padding masks for CLIP (vision datasets only)
+- `patches_w_image_mask_inputsize_(560, 560).pt` - Padding masks for Llama Vision (vision datasets only)
+
+The padding masks indicate which patches contain actual image content vs padding, essential for accurate patch-level analysis.
+
+To use these datasets:
+1. Obtain datasets from their official sources or provided Drive links
+2. Update the `image_path` or `text_path` columns in `metadata.csv` to reflect your local paths
+3. Run the pipeline scripts with appropriate dataset arguments
+
 
 ## Installation
 
