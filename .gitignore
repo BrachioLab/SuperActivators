@@ -330,6 +330,11 @@ activation_distributions/**
 !activation_distributions/**/
 !activation_distributions/**/.gitkeep
 
+Per_Concept_PTM_Optimization/**
+!Per_Concept_PTM_Optimization/
+!Per_Concept_PTM_Optimization/**/
+!Per_Concept_PTM_Optimization/**/.gitkeep
+
 # Excluded directories
 Hybrid_Results/
 Figs/

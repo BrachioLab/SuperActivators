@@ -261,6 +261,7 @@ Pipeline Output Directories (created during analysis):
 - `prompt_results/` - Prompt-based concept extraction results
 - `Best_Inversion_Percentiles_Cal/` - Optimal percentiles for inversion
 - `Best_Detection_Percentiles_Cal/` - Optimal percentiles for detection
+- `Per_Concept_PTM_Optimization/` - Optimal layer (percentthrumodel) for each concept
 
 Each directory contains subdirectories for: CLEVR, Coco, Broden-Pascal, Broden-OpenSurfaces, Sarcasm, iSarcasm, GoEmotions
 
