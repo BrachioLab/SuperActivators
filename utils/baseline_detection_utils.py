@@ -1324,7 +1324,7 @@ def compute_aggregated_detection_metrics_over_percentiles_allpairs(percentiles: 
                                                                   patch_size: int = 14,
                                                                   n_clusters: int = 1000,
                                                                   random_seed: int = 42,
-                                                                  scratch_dir: str = '/scratch/cgoldberg/') -> None:
+                                                                  scratch_dir: str = '') -> None:
     """
     Computes detection metrics over multiple percentiles for all (concept, cluster) pairs using aggregated activations.
     

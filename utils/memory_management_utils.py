@@ -42,7 +42,7 @@ class ChunkedEmbeddingLoader:
         Args:
             dataset_name: Name of the dataset (e.g., 'CLEVR')
             embeddings_file: Filename of embeddings (e.g., 'Llama_patch_embeddings_percentthrumodel_100.pt')
-            scratch_dir: Base scratch directory (e.g., '/scratch/cgoldberg/')
+            scratch_dir: Base scratch directory (e.g., '/path/to/scratch/')
             device: Device to load embeddings on
             use_memmap: Whether to use memory-mapped files for faster loading
         """
@@ -876,7 +876,7 @@ class ChunkedActivationLoader:
         Args:
             dataset_name: Name of dataset (e.g., 'CLEVR')
             acts_file: Name of activation file (e.g., 'cosine_similarities_avg_concepts_Llama_patch_embeddings_percentthrumodel_100.pt')
-            scratch_dir: Base scratch directory (e.g., '/scratch/cgoldberg/')
+            scratch_dir: Base scratch directory (e.g., '/path/to/scratch/')
             device: Device to load tensors on ('cuda' or 'cpu')
         """
         self.dataset_name = dataset_name

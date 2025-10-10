@@ -40,9 +40,9 @@ def load_activations_for_ptm(
     
     # Create activation loader
     if 'avg' in con_label:
-        acts_path = f'/scratch/cgoldberg/Cosine_Similarities/{dataset_name}'
+        acts_path = f'Cosine_Similarities/{dataset_name}'
     else:
-        acts_path = f'/scratch/cgoldberg/Distances/{dataset_name}'
+        acts_path = f'Distances/{dataset_name}'
     
     acts_loader = ChunkedActivationLoader(
         base_path=acts_path,

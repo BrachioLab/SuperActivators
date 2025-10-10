@@ -233,7 +233,7 @@ def batch_superdetector_inversions(
     local: bool = False,
     split: str = 'cal',
     batch_size: int = 10,  # Smaller batch size for memory efficiency
-    scratch_dir: str = '/scratch/cgoldberg/'
+    scratch_dir: str = ''
 ):
     """
     Compute superdetector inversions ONCE and saves the same result for all percentiles. 
@@ -701,7 +701,7 @@ def all_superdetector_inversions_across_percentiles(percentiles: List[float],
                                                   patch_size: int = 14,
                                                   local: bool = False,
                                                   split: str = 'cal',
-                                                  scratch_dir: str = '/scratch/cgoldberg/'):
+                                                  scratch_dir: str = ''):
     """
     Compute superdetector inversions across multiple percentiles.
     Now uses optimized batch processing.
@@ -756,7 +756,7 @@ def detect_then_invert_superdetector_twostage_metrics(
     patch_size: int = 14,
     agglomerate_type: str = 'avg',
     split: str = 'cal',
-    scratch_dir: str = '/scratch/cgoldberg/'
+    scratch_dir: str = ''
 ):
     """
     Two-stage superdetector method:
@@ -1196,7 +1196,7 @@ def detect_then_invert_twostage_superdetector_with_optimal_thresholds(
     all_object_patches: Optional[set] = None,
     patch_size: int = 14,
     split: str = 'test',
-    scratch_dir: str = '/scratch/cgoldberg/'
+    scratch_dir: str = ''
 ):
     """
     Evaluate two-stage superdetector method on test set using optimal thresholds.

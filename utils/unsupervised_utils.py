@@ -2773,7 +2773,7 @@ def get_matched_concepts_and_data(
     gt_samples_per_concept_test=None,
     gt_samples_per_concept=None,
     concepts=None,
-    scratch_dir='/scratch/cgoldberg/',
+    scratch_dir='',
     acts_file=None
 ):
     """
