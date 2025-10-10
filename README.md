@@ -49,7 +49,9 @@ This codebase is designed to work with the following datasets:
 
 ### Download Prepared Datasets
 
-Download all prepared datasets from: https://drive.google.com/drive/folders/1rwrZjWGRF2OpWv6ESMHn87OVl55KsL65?usp=sharing
+Download CLEVR, Sarcasm, and GoEmotions datasets from: https://drive.google.com/drive/folders/1rwrZjWGRF2OpWv6ESMHn87OVl55KsL65?usp=sharing
+
+(COCO, Broden, and iSarcasm must be obtained from their original sources due to licensing restrictions)
 
 Each dataset folder in `Data/` contains:
 - `metadata.csv` - Sample identifiers, concept/label information, and file paths
