@@ -1,4 +1,4 @@
-# Concept Inversion Research - SuperActivator Tokens
+# SuperActivator Mechanism Analysis
 
 This repository implements the research on **superactivator tokens** - a novel interpretability technique for transformer models that discovers sparse, highly-activated tokens reliably signaling concept presence. This enables state-of-the-art concept detection and more faithful attributions compared to traditional global aggregation methods.
 
