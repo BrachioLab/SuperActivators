@@ -231,43 +231,19 @@ Experiments/
 ```
 
 Pipeline Output Directories (created during analysis):
-```
-Embeddings/
-├── {dataset}/                    # Model embeddings
-│   └── *.pt                     # Chunked embedding files
-Concepts/
-├── {dataset}/
-│   └── *.pt                     # Learned concept vectors (avg, linsep, kmeans)
-Cosine_Similarities/
-├── {dataset}/
-│   └── *.pt                     # Cosine similarity activations
-Distances/
-├── {dataset}/
-│   └── *.pt                     # Signed distances for linear separators
-GT_Samples/
-├── {dataset}/
-│   └── *.pt                     # Ground truth sample indices
-Thresholds/
-├── {dataset}/
-│   └── *.pt                     # Optimal thresholds per concept
-Quant_Results/
-├── {dataset}/
-│   └── *.pt                     # **Final detection metrics, F1 scores, precision/recall**
-activation_distributions/
-├── {dataset}/
-│   └── *.pt                     # Activation distributions for visualization
-prompt_results/
-├── {dataset}/
-│   └── *.txt, *.csv             # Prompt-based concept extraction results
-Best_Inversion_Percentiles_Cal/
-├── {dataset}/
-│   └── *.pt                     # Optimal percentiles for inversion
-Best_Detection_Percentiles_Cal/
-├── {dataset}/
-│   └── *.pt                     # Optimal percentiles for detection
-```
+- `Embeddings/` - Model embeddings for each dataset
+- `Concepts/` - Learned concept vectors (avg, linsep, kmeans)
+- `Cosine_Similarities/` - Cosine similarity activations
+- `Distances/` - Signed distances for linear separators
+- `GT_Samples/` - Ground truth sample indices
+- `Thresholds/` - Optimal thresholds per concept
+- `Quant_Results/` - **Final detection metrics, F1 scores, precision/recall**
+- `activation_distributions/` - Activation distributions for visualization
+- `prompt_results/` - Prompt-based concept extraction results
+- `Best_Inversion_Percentiles_Cal/` - Optimal percentiles for inversion
+- `Best_Detection_Percentiles_Cal/` - Optimal percentiles for detection
 
-Where `{dataset}` is one of: CLEVR, Coco, Broden-Pascal, Broden-OpenSurfaces, Sarcasm, iSarcasm, GoEmotions
+Each directory contains subdirectories for: CLEVR, Coco, Broden-Pascal, Broden-OpenSurfaces, Sarcasm, iSarcasm, GoEmotions
 
 
 
