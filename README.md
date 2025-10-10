@@ -48,7 +48,7 @@ This codebase is designed to work with the following datasets:
 
 - **Sarcasm** - Synthetic sarcasm dataset created for this work. Contains paragraph-level and word-level sarcasm annotations. Full dataset available at **[Google Drive link]**.
 
-- **Augmented iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval).
+- **Augmented iSarcasm** - Extended version of the iSarcasm dataset with additional context. Due to licensing restrictions, base iSarcasm text must be obtained from the [original source](https://github.com/iabufarha/iSarcasmEval). The augmentation process is detailed in the paper.
 
 - **Augmented GoEmotions** - Enhanced version of Google's GoEmotions dataset with additional filler text. Based on [GoEmotions](https://github.com/google-research/google-research/tree/master/goemotions) (CC BY 4.0). Augmented version available at **[Google Drive link]**.
 
