@@ -90,7 +90,7 @@ export CUDA_VISIBLE_DEVICES=0  # Select GPU
 
 ## Main Pipeline
 
-The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `Experiments` directory:
+The main pipeline analyzes concept detection using embeddings from transformer models. Run these scripts sequentially from the `scripts` directory:
 
 ### Core Pipeline Steps:
 ```bash
