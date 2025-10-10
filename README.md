@@ -146,6 +146,8 @@ python scripts/baseline_detections.py
 
 # Find optimal percentthrumodel for each concept
 python scripts/per_concept_ptm_optimization.py
+# → Finds best layer (percentthrumodel) for each concept based on F1 scores
+# → Saves to: Per_Concept_PTM_Optimization/{dataset}/
 ```
 
 ### Command Line Arguments
