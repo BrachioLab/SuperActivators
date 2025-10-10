@@ -211,6 +211,18 @@ scripts/extract_prompt_concepts_fixed.py
 scripts/extract_prompt_concepts_small.py
 scripts/hybrid_concept_analysis.py
 scripts/layer_analysis.py
+
+# Unused scripts and utils (untracked but kept locally)
+scripts/compute_concepts_alignments.py
+scripts/compute_gt_patches.py
+scripts/compute_image_concepts.py
+scripts/correlations_w_labels.py
+scripts/detection_stats.py
+scripts/embed_datasets.py
+scripts/generate_percentthrumodel_mappings.py
+utils/calibration_selection_utils.py
+utils/correlation_utils.py
+utils/plot_superdetectors_over_layers.py
 src/CCE-for-CLS.ipynb
 src/CCE-for-Patches.ipynb
 src/CCE_src/
