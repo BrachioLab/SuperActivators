@@ -230,7 +230,7 @@ Experiments/
 └── pyproject.toml       # Project configuration
 ```
 
-Generated directories (created by pipeline):
+Pipeline Output Directories:
 - `Embeddings/` - Model embeddings for each dataset
 - `Concepts/` - Learned concepts
 - `Cosine_Similarities/` - Activation measures
