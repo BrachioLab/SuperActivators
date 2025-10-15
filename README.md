@@ -1,6 +1,6 @@
 # SuperActivator Mechanism Analysis
 
-This repository implements the research on **superactivator tokens** - a novel interpretability technique for transformer models that discovers sparse, highly-activated tokens reliably signaling concept presence. This enables state-of-the-art concept detection and more faithful attributions compared to traditional global aggregation methods.
+This repository implements the research on **superactivator tokens** - a phenomenon where a small subset of highly-activated tokens in the extreme tail of activation distributions can reliably signal concept presence. This repository contains the implementation for studying concept detection and inversion using these superactivator tokens.
 
 ## Table of Contents
 - [Overview](#overview)
@@ -11,11 +11,6 @@ This repository implements the research on **superactivator tokens** - a novel i
 - [Visualization & Analysis](#visualization--analysis)
 - [Directory Structure](#directory-structure)
 
-## Overview
-
-This repository contains the implementation for studying concept detection in transformer models. The codebase focuses on understanding how transformers encode semantic concepts and developing improved methods for detecting and localizing these concepts.
-
-The main contribution is the discovery and analysis of the **SuperActivator Mechanism** - a phenomenon where a small subset of highly-activated tokens in the extreme tail of activation distributions can reliably signal concept presence. This approach addresses limitations in standard concept detection methods that suffer from noisy activations and poor localization.
 
 ### Supported Models
 
