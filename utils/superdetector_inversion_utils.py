@@ -20,7 +20,7 @@ from utils.memory_management_utils import (
     convert_text_sentence_to_token_indices
 )
 from utils.quant_concept_evals_utils import get_patch_split_df, filter_patches_by_image_presence
-from utils.patch_mapping_helpers import get_patch_indices_for_concepts_and_images
+# from utils.patch_mapping_helpers import get_patch_indices_for_concepts_and_images
 from utils.patch_alignment_utils import (
     get_patch_range_for_image, get_patch_range_for_text, 
     compute_patches_per_image, filter_patches_by_image_presence as filter_patches_utils
@@ -81,12 +81,8 @@ def find_all_superdetector_patches(percentile: float,
             continue
         
         # Get ground truth patch indices for this concept
-        if gt_patches and concept in gt_patches:
-            concept_patch_indices = list(gt_patches.get(concept, []))
-        else:
-            # Fallback to computing from image indices
-            patch_indices = get_patch_indices_for_concepts_and_images([concept], test_image_indices, dataset_name, model_input_size)
-            concept_patch_indices = patch_indices.get(concept, [])
+        assert gt_patches and concept in gt_patches, f"Missing ground truth patches for concept: {concept}"
+        concept_patch_indices = list(gt_patches.get(concept, []))
         
         if not concept_patch_indices:
             all_superdetectors[concept] = []

@@ -66,20 +66,32 @@ To use these datasets:
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd Experiments
+cd SuperActivators
 ```
 
 2. Install dependencies:
 ```bash
 pip install -r requirements.txt
-# or using the pyproject.toml
+# then install this project
 pip install -e .
 ```
 
 3. Set up environment variables if needed:
 ```bash
+export HF_TOKEN=<TOKEN>
 export HF_HOME=/path/to/huggingface/cache
 export CUDA_VISIBLE_DEVICES=0  # Select GPU
+```
+
+4. Install additional data from Google Drive too large to fit in repo, and then unzip:
+```bash
+# unzip the file
+unzip SuperActivator_Data.zip
+
+# move downloaded data to the correct location
+mv SuperActivator\ Data/CLEVR/* Data/CLEVR/
+mv SuperActivator\ Data/Augmented_GoEmotions/* Data/Augmented_GoEmotions/
+mv SuperActivator\ Data/Sarcasm/* Data/Sarcasm/
 ```
 
 ## Main Concept Detection Analysis
@@ -88,15 +100,15 @@ The concept detection analysis extracts embeddings from transformer models and e
 
 ### Core Analysis Steps:
 ```bash
-# 1. Extract embeddings
+# 1. Extract embeddings (note this will always install both CLIP and Llama models from HF)
 # For images:
-python scripts/embed_image_datasets.py
-# → Computes CLIP/Llama embeddings for image patches and CLS tokens
-# → Saves to: Embeddings/{dataset}/
-
 python scripts/compute_image_gt_samples.py
 # → Identifies ground truth sample indices for concept evaluation
 # → Saves to: GT_Samples/{dataset}/
+
+python scripts/embed_image_datasets.py
+# → Computes CLIP/Llama embeddings for image patches and CLS tokens
+# → Saves to: Embeddings/{dataset}/
 
 # For text:
 python scripts/embed_text_datasets.py
@@ -231,7 +243,7 @@ jupyter lab notebooks/
 ## Directory Structure
 
 ```
-Experiments/
+SuperActivators/
 ├── scripts/              # Main analysis scripts
 │   ├── embed_*.py       # Embedding extraction
 │   ├── compute_*.py     # Concept learning & activation
