@@ -248,6 +248,7 @@ SuperActivators/
 │   ├── embed_*.py       # Embedding extraction
 │   ├── compute_*.py     # Concept learning & activation
 │   ├── validation_*.py  # Threshold optimization
+│   ├── attribution/     # Attribution methods
 │   └── pretrained_saes/ # SAE analysis scripts
 ├── notebooks/           # Jupyter notebooks for visualization
 ├── utils/               # Utility functions
